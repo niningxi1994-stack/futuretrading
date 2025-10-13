@@ -1,0 +1,91 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Runtime files
+*.pid
+trading_system.pid
+
+# Database files
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Backup files
+data/backup/
+*.bak
+
+# Temporary files
+*.tmp
+.cache/
+
+# pytest
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+*.cover
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Sensitive data
+*.pem
+*.key
+secrets/
+.env
+.env.local
+
+# Trading specific
+demo/
+op_trade_data/
+check_pending_orders.py
+
