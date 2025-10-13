@@ -17,9 +17,9 @@ LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 # 日志文件
-SYSTEM_LOG="$LOG_DIR/trading_system.log"
-STDOUT_LOG="$LOG_DIR/stdout.log"
-STDERR_LOG="$LOG_DIR/stderr.log"
+SYSTEM_LOG="$LOG_DIR/trading_system.log"  # Python logging 主日志
+STDOUT_LOG="$LOG_DIR/stdout.log"          # 控制台输出（含 logging 输出）
+STDERR_LOG="$LOG_DIR/stderr.log"          # 未捕获的异常和真正的错误
 
 # PID 文件
 PID_FILE="$PROJECT_DIR/trading_system.pid"
@@ -137,7 +137,12 @@ start_system() {
     echo "=================================================" >> "$STDOUT_LOG"
     
     # 后台启动，重定向输出
-    nohup "$PYTHON" "$SCRIPT" --config "$CONFIG_FILE" \
+    # 说明：
+    # - trading_system.log: Python logging 的主日志（总是写入）
+    # - stdout.log: 捕获 print 语句和启动信息
+    # - stderr.log: 捕获未捕获的异常和系统错误
+    # 后台运行时，system.py 会自动禁用控制台输出，避免重复
+    nohup "$PYTHON" -u "$SCRIPT" --config "$CONFIG_FILE" \
         >> "$STDOUT_LOG" 2>> "$STDERR_LOG" &
     
     # 保存 PID

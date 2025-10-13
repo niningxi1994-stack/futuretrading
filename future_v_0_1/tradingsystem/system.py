@@ -578,14 +578,26 @@ if __name__ == "__main__":
     log_dir.mkdir(exist_ok=True)  # 确保日志目录存在
     log_file = log_dir / 'trading_system.log'
     
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(str(log_file)),
-            logging.StreamHandler()
-        ]
-    )
+    # 获取 root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    
+    # 清除已有的 handlers（避免重复）
+    root_logger.handlers.clear()
+    
+    # 配置日志格式
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    # 添加文件处理器（总是添加）
+    file_handler = logging.FileHandler(str(log_file))
+    file_handler.setFormatter(formatter)
+    root_logger.addHandler(file_handler)
+    
+    # 只在前台运行时添加控制台输出
+    if sys.stdout.isatty():
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        root_logger.addHandler(console_handler)
     
     logger = logging.getLogger(__name__)
     
