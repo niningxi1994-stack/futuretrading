@@ -1,0 +1,1133 @@
+{
+  "backtest_time": "2025-10-22T14:00:24.598372",
+  "duration_seconds": 71.023545,
+  "config_file": "config_v7.yaml",
+  "csv_dir": "future_v_0_1/database/call_csv_files_clean",
+  "initial_cash": 100000.0,
+  "report": {
+    "=== 账户概况 ===": {
+      "初始资金": "$100,000.00",
+      "最终资金": "$98,621.55",
+      "持仓市值": "$0.00",
+      "总资产": "$98,621.55",
+      "总盈亏": "$-1,378.45",
+      "收益率": "-1.38%"
+    },
+    "=== 交易统计 ===": {
+      "总信号数": 100,
+      "买入信号": 10,
+      "过滤信号": 90,
+      "过滤率": "90.0%",
+      "实际交易数": 10,
+      "持仓数": 0
+    },
+    "=== 盈亏分析 ===": {
+      "已实现盈亏": "$-1,378.45",
+      "未实现盈亏": "$+0.00"
+    }
+  },
+  "trades": [
+    {
+      "type": "BUY",
+      "symbol": "JPM",
+      "time": "2023-03-10 15:11:30-05:00",
+      "shares": 299,
+      "price": 133.52338999999998,
+      "amount": 39923.49360999999,
+      "premium": 943000.0,
+      "position_ratio": 0.4
+    },
+    {
+      "type": "BUY",
+      "symbol": "SRE",
+      "time": "2023-03-13 14:54:13-04:00",
+      "shares": 253,
+      "price": 72.7952225,
+      "amount": 18417.1912925,
+      "premium": 148000.0,
+      "position_ratio": 0.185
+    },
+    {
+      "type": "BUY",
+      "symbol": "WAL",
+      "time": "2023-03-14 13:45:13-04:00",
+      "shares": 1062,
+      "price": 31.181149999999995,
+      "amount": 33114.381299999994,
+      "premium": 266000.0,
+      "position_ratio": 0.3325
+    },
+    {
+      "type": "SELL",
+      "symbol": "WAL",
+      "time": "2023-03-14 14:59:00-04:00",
+      "shares": 1062,
+      "price": 27.7096,
+      "amount": 29427.5952,
+      "reason": "止损"
+    },
+    {
+      "type": "SELL",
+      "symbol": "JPM",
+      "time": "2023-03-16 15:00:00-04:00",
+      "shares": 299,
+      "price": 130.36,
+      "amount": 38977.64000000001,
+      "reason": "定时退出(6天)"
+    },
+    {
+      "type": "BUY",
+      "symbol": "AIV",
+      "time": "2023-03-16 15:46:50-04:00",
+      "shares": 5407,
+      "price": 7.082075,
+      "amount": 38292.779525,
+      "premium": 592000.0,
+      "position_ratio": 0.4
+    },
+    {
+      "type": "BUY",
+      "symbol": "ALGN",
+      "time": "2023-03-20 14:21:26-04:00",
+      "shares": 91,
+      "price": 316.37606,
+      "amount": 28790.22146,
+      "premium": 240000.0,
+      "position_ratio": 0.3
+    },
+    {
+      "type": "SELL",
+      "symbol": "SRE",
+      "time": "2023-03-20 15:00:00-04:00",
+      "shares": 253,
+      "price": 73.525,
+      "amount": 18601.825,
+      "reason": "定时退出(7天)"
+    },
+    {
+      "type": "BUY",
+      "symbol": "PSX",
+      "time": "2023-03-21 14:34:32-04:00",
+      "shares": 174,
+      "price": 95.49539999999999,
+      "amount": 16616.1996,
+      "premium": 138000.0,
+      "position_ratio": 0.1725
+    },
+    {
+      "type": "SELL",
+      "symbol": "AIV",
+      "time": "2023-03-22 15:00:00-04:00",
+      "shares": 5407,
+      "price": 7.065,
+      "amount": 38200.455,
+      "reason": "定时退出(6天)"
+    },
+    {
+      "type": "BUY",
+      "symbol": "DB",
+      "time": "2023-03-23 13:26:41-04:00",
+      "shares": 3795,
+      "price": 9.994984999999998,
+      "amount": 37930.96807499999,
+      "premium": 972000.0,
+      "position_ratio": 0.4
+    },
+    {
+      "type": "SELL",
+      "symbol": "DB",
+      "time": "2023-03-24 09:32:00-04:00",
+      "shares": 3795,
+      "price": 8.98,
+      "amount": 34079.1,
+      "reason": "止损"
+    },
+    {
+      "type": "SELL",
+      "symbol": "ALGN",
+      "time": "2023-03-27 15:00:00-04:00",
+      "shares": 91,
+      "price": 306.86,
+      "amount": 27924.260000000002,
+      "reason": "定时退出(7天)"
+    },
+    {
+      "type": "SELL",
+      "symbol": "PSX",
+      "time": "2023-03-27 15:00:00-04:00",
+      "shares": 174,
+      "price": 96.64,
+      "amount": 16815.36,
+      "reason": "定时退出(6天)"
+    },
+    {
+      "type": "BUY",
+      "symbol": "AGI",
+      "time": "2023-03-27 15:22:35-04:00",
+      "shares": 1161,
+      "price": 11.7418301,
+      "amount": 13632.2647461,
+      "premium": 120000.0,
+      "position_ratio": 0.15
+    },
+    {
+      "type": "BUY",
+      "symbol": "COOP",
+      "time": "2023-03-28 13:24:46-04:00",
+      "shares": 447,
+      "price": 38.76872999999999,
+      "amount": 17329.622309999995,
+      "premium": 152000.0,
+      "position_ratio": 0.19
+    },
+    {
+      "type": "BUY",
+      "symbol": "WYNN",
+      "time": "2023-03-30 13:25:07-04:00",
+      "shares": 296,
+      "price": 108.87876999999999,
+      "amount": 32228.115919999997,
+      "premium": 282000.0,
+      "position_ratio": 0.3525
+    },
+    {
+      "type": "SELL",
+      "symbol": "AGI",
+      "time": "2025-10-22 02:00:24.107480-04:00",
+      "shares": 1161,
+      "price": 13.67,
+      "amount": 15870.87,
+      "reason": "回测结束"
+    },
+    {
+      "type": "SELL",
+      "symbol": "COOP",
+      "time": "2025-10-22 02:00:24.107480-04:00",
+      "shares": 447,
+      "price": 66.08,
+      "amount": 29537.76,
+      "reason": "回测结束"
+    },
+    {
+      "type": "SELL",
+      "symbol": "WYNN",
+      "time": "2025-10-22 02:00:24.107480-04:00",
+      "shares": 296,
+      "price": 86.02,
+      "amount": 25461.92,
+      "reason": "回测结束"
+    }
+  ],
+  "signals": [
+    {
+      "file": "GS_2023-03-10_ET.csv",
+      "symbol": "GS",
+      "time": "2023-03-10 09:39:39-05:00",
+      "premium": 122000.0,
+      "price": 330.98,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "SCHW_2023-03-10_ET.csv",
+      "symbol": "SCHW",
+      "time": "2023-03-10 10:10:01-05:00",
+      "premium": 1450000.0,
+      "price": 60.89,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "TFC_2023-03-10_ET.csv",
+      "symbol": "TFC",
+      "time": "2023-03-10 10:16:33-05:00",
+      "premium": 135000.0,
+      "price": 39.67,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "GE_2023-03-11_ET.csv",
+      "symbol": "GE",
+      "time": "2023-03-10 11:04:38-05:00",
+      "premium": 1650000.0,
+      "price": 93.62,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "NFLX_2023-03-11_ET.csv",
+      "symbol": "NFLX",
+      "time": "2023-03-10 13:59:19-05:00",
+      "premium": 100000.0,
+      "price": 289.25,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "LMT_2023-03-11_ET.csv",
+      "symbol": "LMT",
+      "time": "2023-03-10 14:21:58-05:00",
+      "premium": 124000.0,
+      "price": 477.63,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "JPM_2023-03-11_ET.csv",
+      "symbol": "JPM",
+      "time": "2023-03-10 15:11:30-05:00",
+      "premium": 943000.0,
+      "price": 133.55,
+      "decision": "BUY",
+      "shares": 299,
+      "position_ratio": 0.4
+    },
+    {
+      "file": "TFC_2023-03-13_ET.csv",
+      "symbol": "TFC",
+      "time": "2023-03-13 09:50:25-04:00",
+      "premium": 245000.0,
+      "price": 31.2,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "SCHW_2023-03-13_ET.csv",
+      "symbol": "SCHW",
+      "time": "2023-03-13 10:42:41-04:00",
+      "premium": 100000.0,
+      "price": 47.68,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "CMG_2023-03-14_ET.csv",
+      "symbol": "CMG",
+      "time": "2023-03-13 12:42:01-04:00",
+      "premium": 207000.0,
+      "price": 1574.29,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "LYV_2023-03-14_ET.csv",
+      "symbol": "LYV",
+      "time": "2023-03-13 13:25:46-04:00",
+      "premium": 544000.0,
+      "price": 68.17,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "SRE_2023-03-14_ET.csv",
+      "symbol": "SRE",
+      "time": "2023-03-13 14:54:13-04:00",
+      "premium": 148000.0,
+      "price": 145.48,
+      "decision": "BUY",
+      "shares": 253,
+      "position_ratio": 0.185
+    },
+    {
+      "file": "SMG_2023-03-14_ET.csv",
+      "symbol": "SMG",
+      "time": "2023-03-13 15:13:47-04:00",
+      "premium": 145000.0,
+      "price": 74.27,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "COIN_2023-03-14_ET.csv",
+      "symbol": "COIN",
+      "time": "2023-03-14 09:32:00-04:00",
+      "premium": 106000.0,
+      "price": 65.63,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "FDX_2023-03-14_ET.csv",
+      "symbol": "FDX",
+      "time": "2023-03-14 10:55:26-04:00",
+      "premium": 322000.0,
+      "price": 201.01,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "BYND_2023-03-14_ET.csv",
+      "symbol": "BYND",
+      "time": "2023-03-14 11:11:06-04:00",
+      "premium": 114000.0,
+      "price": 17.99,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "MELI_2023-03-14_ET.csv",
+      "symbol": "MELI",
+      "time": "2023-03-14 11:31:03-04:00",
+      "premium": 139000.0,
+      "price": 1197.72,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "WAL_2023-03-15_ET.csv",
+      "symbol": "WAL",
+      "time": "2023-03-14 13:45:13-04:00",
+      "premium": 266000.0,
+      "price": 31.09,
+      "decision": "BUY",
+      "shares": 1062,
+      "position_ratio": 0.3325
+    },
+    {
+      "file": "DE_2023-03-15_ET.csv",
+      "symbol": "DE",
+      "time": "2023-03-14 14:02:13-04:00",
+      "premium": 1660000.0,
+      "price": 399.5,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "OMI_2023-03-15_ET.csv",
+      "symbol": "OMI",
+      "time": "2023-03-14 14:35:56-04:00",
+      "premium": 185000.0,
+      "price": 12.86,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "CCL_2023-03-15_ET.csv",
+      "symbol": "CCL",
+      "time": "2023-03-14 14:47:20-04:00",
+      "premium": 201000.0,
+      "price": 9.13,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "FITB_2023-03-15_ET.csv",
+      "symbol": "FITB",
+      "time": "2023-03-14 15:54:23-04:00",
+      "premium": 195000.0,
+      "price": 25.99,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "MRUS_2023-03-15_ET.csv",
+      "symbol": "MRUS",
+      "time": "2023-03-15 10:03:20-04:00",
+      "premium": 300000.0,
+      "price": 19.94,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "SCHW_2023-03-16_ET.csv",
+      "symbol": "SCHW",
+      "time": "2023-03-15 12:18:14-04:00",
+      "premium": 130000.0,
+      "price": 57.88,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "EQIX_2023-03-16_ET.csv",
+      "symbol": "EQIX",
+      "time": "2023-03-15 13:07:15-04:00",
+      "premium": 420000.0,
+      "price": 688.92,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "CLF_2023-03-16_ET.csv",
+      "symbol": "CLF",
+      "time": "2023-03-15 14:40:05-04:00",
+      "premium": 930000.0,
+      "price": 17.4,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "COP_2023-03-16_ET.csv",
+      "symbol": "COP",
+      "time": "2023-03-15 14:49:34-04:00",
+      "premium": 221000.0,
+      "price": 95.08,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "CMI_2023-03-16_ET.csv",
+      "symbol": "CMI",
+      "time": "2023-03-15 15:20:58-04:00",
+      "premium": 122000.0,
+      "price": 229.82,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "ADBE_2023-03-16_ET.csv",
+      "symbol": "ADBE",
+      "time": "2023-03-16 09:59:14-04:00",
+      "premium": 125000.0,
+      "price": 344.03,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "FCNCA_2023-03-16_ET.csv",
+      "symbol": "FCNCA",
+      "time": "2023-03-16 10:29:44-04:00",
+      "premium": 911000.0,
+      "price": 520.0,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "FSLR_2023-03-16_ET.csv",
+      "symbol": "FSLR",
+      "time": "2023-03-16 10:42:17-04:00",
+      "premium": 638000.0,
+      "price": 200.28,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "MAT_2023-03-16_ET.csv",
+      "symbol": "MAT",
+      "time": "2023-03-16 10:45:04-04:00",
+      "premium": 140000.0,
+      "price": 15.91,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "CMG_2023-03-16_ET.csv",
+      "symbol": "CMG",
+      "time": "2023-03-16 11:35:21-04:00",
+      "premium": 130000.0,
+      "price": 1633.05,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "BKNG_2023-03-17_ET.csv",
+      "symbol": "BKNG",
+      "time": "2023-03-16 12:12:35-04:00",
+      "premium": 229000.0,
+      "price": 2438.85,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "EQT_2023-03-17_ET.csv",
+      "symbol": "EQT",
+      "time": "2023-03-16 12:48:14-04:00",
+      "premium": 1210000.0,
+      "price": 29.47,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "UBER_2023-03-17_ET.csv",
+      "symbol": "UBER",
+      "time": "2023-03-16 12:50:12-04:00",
+      "premium": 188000.0,
+      "price": 32.66,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "UAL_2023-03-17_ET.csv",
+      "symbol": "UAL",
+      "time": "2023-03-16 14:55:09-04:00",
+      "premium": 127000.0,
+      "price": 43.49,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "AIV_2023-03-17_ET.csv",
+      "symbol": "AIV",
+      "time": "2023-03-16 15:46:50-04:00",
+      "premium": 592000.0,
+      "price": 7.09,
+      "decision": "BUY",
+      "shares": 5407,
+      "position_ratio": 0.4
+    },
+    {
+      "file": "MS_2023-03-17_ET.csv",
+      "symbol": "MS",
+      "time": "2023-03-17 10:31:32-04:00",
+      "premium": 1710000.0,
+      "price": 85.03,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "ADBE_2023-03-18_ET.csv",
+      "symbol": "ADBE",
+      "time": "2023-03-17 13:15:24-04:00",
+      "premium": 230000.0,
+      "price": 357.01,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "BRKB_2023-03-20_ET.csv",
+      "symbol": "BRKB",
+      "time": "2023-03-20 09:51:31-04:00",
+      "premium": 211000.0,
+      "price": 297.89,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "OXY_2023-03-20_ET.csv",
+      "symbol": "OXY",
+      "time": "2023-03-20 09:58:05-04:00",
+      "premium": 644000.0,
+      "price": 58.84,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "MA_2023-03-20_ET.csv",
+      "symbol": "MA",
+      "time": "2023-03-20 10:28:16-04:00",
+      "premium": 150000.0,
+      "price": 352.05,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "VEEV_2023-03-20_ET.csv",
+      "symbol": "VEEV",
+      "time": "2023-03-20 11:55:06-04:00",
+      "premium": 135000.0,
+      "price": 171.56,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "TEAM_2023-03-21_ET.csv",
+      "symbol": "TEAM",
+      "time": "2023-03-20 12:30:48-04:00",
+      "premium": 119000.0,
+      "price": 150.44,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "BMY_2023-03-21_ET.csv",
+      "symbol": "BMY",
+      "time": "2023-03-20 12:46:19-04:00",
+      "premium": 368000.0,
+      "price": 66.91,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "ALGN_2023-03-21_ET.csv",
+      "symbol": "ALGN",
+      "time": "2023-03-20 14:21:26-04:00",
+      "premium": 240000.0,
+      "price": 316.68,
+      "decision": "BUY",
+      "shares": 91,
+      "position_ratio": 0.3
+    },
+    {
+      "file": "ENPH_2023-03-21_ET.csv",
+      "symbol": "ENPH",
+      "time": "2023-03-20 14:33:17-04:00",
+      "premium": 423000.0,
+      "price": 192.18,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "ACI_2023-03-21_ET.csv",
+      "symbol": "ACI",
+      "time": "2023-03-21 09:47:49-04:00",
+      "premium": 160000.0,
+      "price": 19.31,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "BKNG_2023-03-21_ET.csv",
+      "symbol": "BKNG",
+      "time": "2023-03-21 09:49:09-04:00",
+      "premium": 100000.0,
+      "price": 2544.33,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "KGC_2023-03-21_ET.csv",
+      "symbol": "KGC",
+      "time": "2023-03-21 10:11:00-04:00",
+      "premium": 160000.0,
+      "price": 4.11,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "PNR_2023-03-21_ET.csv",
+      "symbol": "PNR",
+      "time": "2023-03-21 10:17:57-04:00",
+      "premium": 125000.0,
+      "price": 52.93,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "FCNCA_2023-03-21_ET.csv",
+      "symbol": "FCNCA",
+      "time": "2023-03-21 10:35:29-04:00",
+      "premium": 118000.0,
+      "price": 575.38,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "TKR_2023-03-21_ET.csv",
+      "symbol": "TKR",
+      "time": "2023-03-21 10:36:08-04:00",
+      "premium": 123000.0,
+      "price": 77.67,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "MDGL_2023-03-21_ET.csv",
+      "symbol": "MDGL",
+      "time": "2023-03-21 10:59:39-04:00",
+      "premium": 166000.0,
+      "price": 246.28,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "ADBE_2023-03-21_ET.csv",
+      "symbol": "ADBE",
+      "time": "2023-03-21 11:06:12-04:00",
+      "premium": 260000.0,
+      "price": 364.8,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "FSLR_2023-03-22_ET.csv",
+      "symbol": "FSLR",
+      "time": "2023-03-21 12:28:55-04:00",
+      "premium": 176000.0,
+      "price": 207.89,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "NEM_2023-03-22_ET.csv",
+      "symbol": "NEM",
+      "time": "2023-03-21 13:36:41-04:00",
+      "premium": 500000.0,
+      "price": 46.07,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "PSX_2023-03-22_ET.csv",
+      "symbol": "PSX",
+      "time": "2023-03-21 14:34:32-04:00",
+      "premium": 138000.0,
+      "price": 95.42,
+      "decision": "BUY",
+      "shares": 174,
+      "position_ratio": 0.1725
+    },
+    {
+      "file": "NKE_2023-03-22_ET.csv",
+      "symbol": "NKE",
+      "time": "2023-03-21 15:32:59-04:00",
+      "premium": 302000.0,
+      "price": 125.05,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "SDGR_2023-03-22_ET.csv",
+      "symbol": "SDGR",
+      "time": "2023-03-21 15:43:05-04:00",
+      "premium": 400000.0,
+      "price": 26.94,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "TMO_2023-03-22_ET.csv",
+      "symbol": "TMO",
+      "time": "2023-03-22 09:38:34-04:00",
+      "premium": 115000.0,
+      "price": 557.21,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "ZS_2023-03-22_ET.csv",
+      "symbol": "ZS",
+      "time": "2023-03-22 10:20:23-04:00",
+      "premium": 144000.0,
+      "price": 111.75,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "F_2023-03-22_ET.csv",
+      "symbol": "F",
+      "time": "2023-03-22 10:29:02-04:00",
+      "premium": 124000.0,
+      "price": 11.9,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "LLY_2023-03-22_ET.csv",
+      "symbol": "LLY",
+      "time": "2023-03-22 10:59:20-04:00",
+      "premium": 354000.0,
+      "price": 333.92,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "ANET_2023-03-23_ET.csv",
+      "symbol": "ANET",
+      "time": "2023-03-22 13:41:25-04:00",
+      "premium": 130000.0,
+      "price": 167.93,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "MELI_2023-03-23_ET.csv",
+      "symbol": "MELI",
+      "time": "2023-03-22 14:48:10-04:00",
+      "premium": 108000.0,
+      "price": 1219.47,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "BPOP_2023-03-23_ET.csv",
+      "symbol": "BPOP",
+      "time": "2023-03-22 14:49:05-04:00",
+      "premium": 114000.0,
+      "price": 54.7,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "CRM_2023-03-23_ET.csv",
+      "symbol": "CRM",
+      "time": "2023-03-22 15:03:30-04:00",
+      "premium": 106000.0,
+      "price": 188.7,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "PSX_2023-03-23_ET.csv",
+      "symbol": "PSX",
+      "time": "2023-03-22 15:30:29-04:00",
+      "premium": 246000.0,
+      "price": 95.96,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "NFLX_2023-03-23_ET.csv",
+      "symbol": "NFLX",
+      "time": "2023-03-23 09:49:03-04:00",
+      "premium": 256000.0,
+      "price": 313.49,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "NGD_2023-03-23_ET.csv",
+      "symbol": "NGD",
+      "time": "2023-03-23 10:00:15-04:00",
+      "premium": 150000.0,
+      "price": 0.95,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "EFX_2023-03-23_ET.csv",
+      "symbol": "EFX",
+      "time": "2023-03-23 10:00:55-04:00",
+      "premium": 151000.0,
+      "price": 196.12,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "REGN_2023-03-23_ET.csv",
+      "symbol": "REGN",
+      "time": "2023-03-23 10:51:25-04:00",
+      "premium": 253000.0,
+      "price": 804.69,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "IAG_2023-03-23_ET.csv",
+      "symbol": "IAG",
+      "time": "2023-03-23 11:37:29-04:00",
+      "premium": 160000.0,
+      "price": 2.52,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "DG_2023-03-24_ET.csv",
+      "symbol": "DG",
+      "time": "2023-03-23 12:18:38-04:00",
+      "premium": 680000.0,
+      "price": 205.49,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "DB_2023-03-24_ET.csv",
+      "symbol": "DB",
+      "time": "2023-03-23 13:26:41-04:00",
+      "premium": 972000.0,
+      "price": 9.99,
+      "decision": "BUY",
+      "shares": 3795,
+      "position_ratio": 0.4
+    },
+    {
+      "file": "PNC_2023-03-24_ET.csv",
+      "symbol": "PNC",
+      "time": "2023-03-23 15:24:04-04:00",
+      "premium": 141000.0,
+      "price": 122.2,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "WAL_2023-03-25_ET.csv",
+      "symbol": "WAL",
+      "time": "2023-03-24 13:56:12-04:00",
+      "premium": 110000.0,
+      "price": 32.57,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "PSX_2023-03-25_ET.csv",
+      "symbol": "PSX",
+      "time": "2023-03-24 14:17:47-04:00",
+      "premium": 167000.0,
+      "price": 93.58,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "FCNCA_2023-03-27_ET.csv",
+      "symbol": "FCNCA",
+      "time": "2023-03-27 09:33:51-04:00",
+      "premium": 140000.0,
+      "price": 846.27,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "NFLX_2023-03-27_ET.csv",
+      "symbol": "NFLX",
+      "time": "2023-03-27 09:57:34-04:00",
+      "premium": 130000.0,
+      "price": 333.08,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "DHR_2023-03-27_ET.csv",
+      "symbol": "DHR",
+      "time": "2023-03-27 10:44:46-04:00",
+      "premium": 353000.0,
+      "price": 248.88,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "DUOL_2023-03-28_ET.csv",
+      "symbol": "DUOL",
+      "time": "2023-03-27 12:11:04-04:00",
+      "premium": 103000.0,
+      "price": 134.08,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "ABBV_2023-03-28_ET.csv",
+      "symbol": "ABBV",
+      "time": "2023-03-27 13:56:17-04:00",
+      "premium": 166000.0,
+      "price": 157.93,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "AGI_2023-03-28_ET.csv",
+      "symbol": "AGI",
+      "time": "2023-03-27 15:22:35-04:00",
+      "premium": 120000.0,
+      "price": 11.74,
+      "decision": "BUY",
+      "shares": 1161,
+      "position_ratio": 0.15
+    },
+    {
+      "file": "AVTR_2023-03-28_ET.csv",
+      "symbol": "AVTR",
+      "time": "2023-03-28 11:03:33-04:00",
+      "premium": 132000.0,
+      "price": 21.0,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "COOP_2023-03-29_ET.csv",
+      "symbol": "COOP",
+      "time": "2023-03-28 13:24:46-04:00",
+      "premium": 152000.0,
+      "price": 38.68,
+      "decision": "BUY",
+      "shares": 447,
+      "position_ratio": 0.19
+    },
+    {
+      "file": "LULU_2023-03-29_ET.csv",
+      "symbol": "LULU",
+      "time": "2023-03-28 14:50:19-04:00",
+      "premium": 257000.0,
+      "price": 317.51,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "AGI_2023-03-29_ET.csv",
+      "symbol": "AGI",
+      "time": "2023-03-28 15:36:08-04:00",
+      "premium": 320000.0,
+      "price": 12.15,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "MSTR_2023-03-29_ET.csv",
+      "symbol": "MSTR",
+      "time": "2023-03-29 09:48:33-04:00",
+      "premium": 185000.0,
+      "price": 268.47,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "CCJ_2023-03-29_ET.csv",
+      "symbol": "CCJ",
+      "time": "2023-03-29 09:49:48-04:00",
+      "premium": 1470000.0,
+      "price": 25.5,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "CNC_2023-03-29_ET.csv",
+      "symbol": "CNC",
+      "time": "2023-03-29 11:11:48-04:00",
+      "premium": 360000.0,
+      "price": 63.15,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "SPT_2023-03-29_ET.csv",
+      "symbol": "SPT",
+      "time": "2023-03-29 11:36:58-04:00",
+      "premium": 210000.0,
+      "price": 57.38,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "LIN_2023-03-30_ET.csv",
+      "symbol": "LIN",
+      "time": "2023-03-30 09:30:10-04:00",
+      "premium": 211000.0,
+      "price": 350.99,
+      "decision": "FILTERED_HISTORICAL",
+      "reason": "历史premium不足"
+    },
+    {
+      "file": "ARE_2023-03-30_ET.csv",
+      "symbol": "ARE",
+      "time": "2023-03-30 10:07:57-04:00",
+      "premium": 484000.0,
+      "price": 124.32,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "AXP_2023-03-31_ET.csv",
+      "symbol": "AXP",
+      "time": "2023-03-30 12:03:27-04:00",
+      "premium": 1010000.0,
+      "price": 162.82,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "WYNN_2023-03-31_ET.csv",
+      "symbol": "WYNN",
+      "time": "2023-03-30 13:25:07-04:00",
+      "premium": 282000.0,
+      "price": 108.76,
+      "decision": "BUY",
+      "shares": 296,
+      "position_ratio": 0.3525
+    },
+    {
+      "file": "ALV_2023-04-03_ET.csv",
+      "symbol": "ALV",
+      "time": "2023-04-03 11:23:17-04:00",
+      "premium": 245000.0,
+      "price": 92.82,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    },
+    {
+      "file": "SNPS_2023-04-04_ET.csv",
+      "symbol": "SNPS",
+      "time": "2023-04-03 13:11:55-04:00",
+      "premium": 565000.0,
+      "price": 386.8,
+      "decision": "FILTERED",
+      "reason": "策略过滤"
+    }
+  ]
+}
