@@ -3,17 +3,24 @@
 ################################################################################
 # 交易系统停止脚本
 # 功能：优雅地停止交易系统
+# 用法：./stop.sh [v6|v7]  默认v6
 ################################################################################
 
+# 策略版本（默认v6）
+STRATEGY_VERSION="${1:-v6}"
+
 # 项目根目录
-PROJECT_DIR="/Users/niningxi/Desktop/future"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR" || exit 1
 
-# PID 文件
-PID_FILE="$PROJECT_DIR/trading_system.pid"
-
-# 日志文件
-STDOUT_LOG="$PROJECT_DIR/logs/stdout.log"
+# 根据策略版本设置文件路径
+if [ "$STRATEGY_VERSION" = "v7" ]; then
+    PID_FILE="$PROJECT_DIR/trading_v7.pid"
+    STDOUT_LOG="$PROJECT_DIR/logs/stdout_v7.log"
+else
+    PID_FILE="$PROJECT_DIR/trading_system.pid"
+    STDOUT_LOG="$PROJECT_DIR/logs/stdout.log"
+fi
 
 ################################################################################
 # 颜色定义
@@ -113,7 +120,7 @@ stop_system() {
 ################################################################################
 main() {
     echo "========================================"
-    echo "   交易系统停止脚本"
+    echo "   交易系统停止脚本 (Strategy $STRATEGY_VERSION)"
     echo "========================================"
     echo
     
