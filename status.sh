@@ -3,19 +3,28 @@
 ################################################################################
 # 交易系统状态查询脚本
 # 功能：查看交易系统运行状态、资源占用、最新日志
+# 用法：./status.sh [v6|v7]  默认v6
 ################################################################################
 
+# 策略版本（默认v6）
+STRATEGY_VERSION="${1:-v6}"
+
 # 项目根目录
-PROJECT_DIR="/Users/niningxi/Desktop/future"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR" || exit 1
 
-# PID 文件
-PID_FILE="$PROJECT_DIR/trading_system.pid"
-
-# 日志文件
-SYSTEM_LOG="$PROJECT_DIR/logs/trading_system.log"
-STDOUT_LOG="$PROJECT_DIR/logs/stdout.log"
-STDERR_LOG="$PROJECT_DIR/logs/stderr.log"
+# 根据策略版本设置文件路径
+if [ "$STRATEGY_VERSION" = "v7" ]; then
+    PID_FILE="$PROJECT_DIR/trading_v7.pid"
+    SYSTEM_LOG="$PROJECT_DIR/logs/trading_system_v7.log"
+    STDOUT_LOG="$PROJECT_DIR/logs/stdout_v7.log"
+    STDERR_LOG="$PROJECT_DIR/logs/stderr_v7.log"
+else
+    PID_FILE="$PROJECT_DIR/trading_system.pid"
+    SYSTEM_LOG="$PROJECT_DIR/logs/trading_system.log"
+    STDOUT_LOG="$PROJECT_DIR/logs/stdout.log"
+    STDERR_LOG="$PROJECT_DIR/logs/stderr.log"
+fi
 
 ################################################################################
 # 颜色定义
@@ -212,7 +221,7 @@ show_commands() {
 ################################################################################
 main() {
     echo "========================================"
-    echo "   交易系统状态查询"
+    echo "   交易系统状态查询 (Strategy $STRATEGY_VERSION)"
     echo "========================================"
     
     # 显示各项信息

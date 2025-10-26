@@ -3,32 +3,44 @@
 ################################################################################
 # 交易系统启动脚本
 # 功能：后台启动交易系统，日志重定向到文件
+# 用法：./start.sh [v6|v7]  默认v6
 ################################################################################
 
+# 策略版本（默认v6）
+STRATEGY_VERSION="${1:-v6}"
+
 # 项目根目录
-PROJECT_DIR="/Users/niningxi/Desktop/future"
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_DIR" || exit 1
 
-# 配置文件
-CONFIG_FILE="$PROJECT_DIR/config.yaml"
+# 根据策略版本设置文件路径
+if [ "$STRATEGY_VERSION" = "v7" ]; then
+    CONFIG_FILE="$PROJECT_DIR/config_v7.yaml"
+    SCRIPT="$PROJECT_DIR/future_v_0_1/tradingsystem/system_v7.py"
+    PID_FILE="$PROJECT_DIR/trading_v7.pid"
+    SYSTEM_LOG_NAME="trading_system_v7.log"
+    STDOUT_LOG_NAME="stdout_v7.log"
+    STDERR_LOG_NAME="stderr_v7.log"
+else
+    CONFIG_FILE="$PROJECT_DIR/config.yaml"
+    SCRIPT="$PROJECT_DIR/future_v_0_1/tradingsystem/system.py"
+    PID_FILE="$PROJECT_DIR/trading_system.pid"
+    SYSTEM_LOG_NAME="trading_system.log"
+    STDOUT_LOG_NAME="stdout.log"
+    STDERR_LOG_NAME="stderr.log"
+fi
 
 # 日志目录
 LOG_DIR="$PROJECT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 # 日志文件
-SYSTEM_LOG="$LOG_DIR/trading_system.log"  # Python logging 主日志
-STDOUT_LOG="$LOG_DIR/stdout.log"          # 控制台输出（含 logging 输出）
-STDERR_LOG="$LOG_DIR/stderr.log"          # 未捕获的异常和真正的错误
-
-# PID 文件
-PID_FILE="$PROJECT_DIR/trading_system.pid"
+SYSTEM_LOG="$LOG_DIR/$SYSTEM_LOG_NAME"  # Python logging 主日志
+STDOUT_LOG="$LOG_DIR/$STDOUT_LOG_NAME"  # 控制台输出（含 logging 输出）
+STDERR_LOG="$LOG_DIR/$STDERR_LOG_NAME"  # 未捕获的异常和真正的错误
 
 # Python 解释器
 PYTHON="python3"
-
-# Python 脚本路径
-SCRIPT="$PROJECT_DIR/future_v_0_1/tradingsystem/system.py"
 
 ################################################################################
 # 颜色定义
@@ -176,7 +188,7 @@ start_system() {
 ################################################################################
 main() {
     echo "========================================"
-    echo "   交易系统启动脚本"
+    echo "   交易系统启动脚本 (Strategy $STRATEGY_VERSION)"
     echo "========================================"
     echo
     

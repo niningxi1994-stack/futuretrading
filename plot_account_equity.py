@@ -1,358 +1,606 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Plot account equity curve from Futu historical orders
+Plot backtest results - Account equity curve analysis
+优化版本，支持JSON和CSV两种格式
+
+使用方法：
+    1. 修改下面的 CONFIGURATION 部分的参数
+    2. 运行: python plot_account_equity.py
+    
+示例：
+    # 绘制V7版本的回测结果（JSON格式）
+    BACKTEST_FILE = 'backtest_v7_final.json'
+    OUTPUT_IMAGE = 'equity_curve_v7.png'
+    
+    # 绘制V6版本的回测结果（CSV格式）
+    BACKTEST_FILE = 'backtest_trades_v6_event_driven.csv'
+    OUTPUT_IMAGE = 'equity_curve_v6.png'
 """
 
-from futu import *
 import pandas as pd
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from datetime import datetime, timedelta
-from collections import defaultdict
+import matplotlib.dates as mdates
 import os
-from dotenv import load_dotenv
+import json
+from zoneinfo import ZoneInfo
 
-# Load environment variables
-load_dotenv()
+# ============================================================================
+# CONFIGURATION - 修改这里的参数
+# ============================================================================
 
-# Configuration from environment variables
-US_SIM_ACC_ID = int(os.getenv('US_SIM_ACC_ID'))
-UNLOCK_PWD = os.getenv('UNLOCK_PWD')
-INITIAL_CAPITAL = int(os.getenv('INITIAL_CAPITAL', '1000000'))
+# 回测结果文件路径（支持.json或.csv格式）
+BACKTEST_FILE = 'testall.json'
 
-def get_historical_orders(days=90):
-    """Get historical orders from Futu"""
-    trd_ctx = OpenSecTradeContext(
-        filter_trdmarket=TrdMarket.US,
-        host='127.0.0.1', 
-        port=11111, 
-        security_firm=SecurityFirm.FUTUSECURITIES
-    )
-    
-    trd_ctx.unlock_trade(UNLOCK_PWD)
-    
-    start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
-    end_date = datetime.now().strftime('%Y-%m-%d')
-    
-    print(f"Getting orders from {start_date} to {end_date}...")
-    
-    ret, orders = trd_ctx.history_order_list_query(
-        trd_env=TrdEnv.SIMULATE,
-        acc_id=US_SIM_ACC_ID,
-        start=start_date,
-        end=end_date
-    )
-    
-    # Get current account info
-    ret2, acc_info = trd_ctx.accinfo_query(
-        trd_env=TrdEnv.SIMULATE,
-        acc_id=US_SIM_ACC_ID
-    )
-    current_assets = float(acc_info.iloc[0]['total_assets']) if ret2 == RET_OK else INITIAL_CAPITAL
-    current_cash = float(acc_info.iloc[0]['cash']) if ret2 == RET_OK else INITIAL_CAPITAL
-    
-    # Get current positions
-    ret3, positions = trd_ctx.position_list_query(
-        trd_env=TrdEnv.SIMULATE,
-        acc_id=US_SIM_ACC_ID
-    )
-    
-    current_positions = {}
-    if ret3 == RET_OK and not positions.empty:
-        for _, pos in positions.iterrows():
-            current_positions[pos['code']] = {
-                'qty': float(pos['qty']),
-                'cost_price': float(pos['cost_price']),
-                'current_price': float(pos['nominal_price'])
-            }
-    
-    trd_ctx.close()
-    
-    print(f"Found {len(orders)} orders")
-    print(f"Current total assets: ${current_assets:,.2f}")
-    print(f"Current cash: ${current_cash:,.2f}")
-    print(f"Current positions: {len(current_positions)}")
-    
-    
-    return orders, current_assets, current_cash, current_positions
+# 输出图片文件名
+OUTPUT_IMAGE = 'equity_curve_v7_ma_filter.png'
 
-def calculate_daily_equity(orders, current_assets, current_cash, current_positions):
-    """Calculate daily equity from orders"""
-    # Filter filled orders
-    filled_orders = orders[orders['order_status'].isin(['FILLED_ALL', 'FILLED_PART'])].copy()
+# 初始资金（如果从JSON读取则会自动使用JSON中的值）
+INITIAL_CAPITAL = 1000000
+
+# SPY和QQQ历史数据文件（使用数据库目录下的文件）
+SPY_DATA_FILE = 'future_v_0_1/database/spy_historical_data.csv'
+QQQ_DATA_FILE = 'future_v_0_1/database/qqq_historical_data.csv'
+
+# ============================================================================
+
+# 设置matplotlib参数
+plt.rcParams['figure.facecolor'] = 'white'
+plt.rcParams['axes.facecolor'] = 'white'
+plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
+def load_backtest_data(filename):
+    """
+    Load backtest data from JSON or CSV file
     
-    if filled_orders.empty:
-        return pd.DataFrame()
+    Returns:
+        tuple: (trades_df, initial_capital, report_dict)
+    """
+    if not os.path.exists(filename):
+        print(f"Error: Cannot find {filename}")
+        return None, None, None
     
-    # Parse dates
-    filled_orders['datetime'] = pd.to_datetime(filled_orders['create_time'])
-    filled_orders['date'] = filled_orders['datetime'].dt.date
-    filled_orders = filled_orders.sort_values('datetime')
+    file_ext = os.path.splitext(filename)[1].lower()
     
-    all_dates = sorted(filled_orders['date'].unique())
-    
-    # Start from initial capital
-    daily_data = []
-    cash = INITIAL_CAPITAL
-    positions = {}
-    
-    # Add starting point
-    if all_dates:
-        first_date = all_dates[0]
-        day_before = pd.to_datetime(first_date) - timedelta(days=1)
-        daily_data.append({
-            'date': day_before,
-            'total_assets': INITIAL_CAPITAL,
-            'cash': INITIAL_CAPITAL,
-            'position_value': 0
-        })
-    
-    # Track total cash flows and fees for debugging
-    total_buy_amount = 0
-    total_sell_amount = 0
-    total_commission_fee = 0  # 佣金
-    total_platform_fee = 0    # 平台费
-    total_settlement_fee = 0  # 交收费
-    total_sec_fee = 0         # SEC费
-    total_taf_fee = 0         # TAF费
-    
-    # Now simulate forward
-    for i, date in enumerate(all_dates):
-        day_orders = filled_orders[filled_orders['date'] == date]
+    if file_ext == '.json':
+        # Load JSON format
+        print(f"Loading backtest data from JSON: {filename}...")
+        with open(filename, 'r', encoding='utf-8') as f:
+            data = json.load(f)
         
-        for _, order in day_orders.iterrows():
-            code = order['code']
-            dealt_qty = float(order['dealt_qty'])
-            dealt_price = float(order['dealt_avg_price'])
-            side = order['trd_side']
+        initial_capital = data.get('initial_cash', INITIAL_CAPITAL)
+        trades_list = data.get('trades', [])
+        report = data.get('report', {})
+        
+        # Convert trades to DataFrame
+        trades_df = pd.DataFrame(trades_list)
+        
+        # Parse time - handle mixed timezone formats
+        # Some times have timezone (-04:00 or -05:00), some don't
+        # Strategy: parse all times, assume no-timezone times are already in ET
+        parsed_times = []
+        for time_str in trades_df['time']:
+            try:
+                # Try to parse with timezone
+                dt = pd.to_datetime(time_str)
+                if dt.tz is not None:
+                    # Has timezone, convert to ET then remove tz
+                    dt_et = dt.astimezone(ZoneInfo('America/New_York'))
+                    dt_naive = dt_et.replace(tzinfo=None)
+                else:
+                    # No timezone, assume it's already in ET
+                    dt_naive = dt
+                parsed_times.append(dt_naive)
+            except Exception as e:
+                print(f"Warning: Failed to parse time '{time_str}': {e}")
+                parsed_times.append(pd.NaT)
+        
+        trades_df['time'] = pd.Series(parsed_times)
+        
+        print(f"  Total trades: {len(trades_df)}")
+        print(f"  Initial capital: ${initial_capital:,.2f}")
+        if len(trades_df) > 0:
+            print(f"  Date range: {trades_df['time'].iloc[0]} to {trades_df['time'].iloc[-1]}")
+        
+        return trades_df, initial_capital, report
+        
+    elif file_ext == '.csv':
+        # Load CSV format
+        print(f"Loading backtest data from CSV: {filename}...")
+        trades_df = pd.read_csv(filename)
+        trades_df['time'] = pd.to_datetime(trades_df['time'])
+        
+        print(f"  Total trades: {len(trades_df)}")
+        print(f"  Date range: {trades_df['time'].iloc[0]} to {trades_df['time'].iloc[-1]}")
+        
+        return trades_df, INITIAL_CAPITAL, None
+    
+    else:
+        print(f"Error: Unsupported file format: {file_ext}")
+        return None, None, None
+
+def load_benchmark_data(filename, symbol_name):
+    """Load SPY or QQQ data from CSV file"""
+    if not os.path.exists(filename):
+        print(f"Warning: Cannot find {filename}")
+        return None
+    
+    print(f"Loading {symbol_name} data from {filename}...")
+    data = pd.read_csv(filename)
+    
+    # Parse Date column with UTC timezone handling
+    data['Date'] = pd.to_datetime(data['Date'], utc=True)
+    
+    # Remove timezone info
+    data['Date'] = data['Date'].dt.tz_localize(None)
+    
+    # Set Date as index
+    data.set_index('Date', inplace=True)
+    
+    print(f"  Data range: {data.index[0].strftime('%Y-%m-%d')} to {data.index[-1].strftime('%Y-%m-%d')}")
+    print(f"  Total records: {len(data)}")
+    
+    return data['Close']
+
+def calculate_equity_curve(trades_df, benchmark_prices, initial_capital):
+    """
+    Calculate daily equity curve by marking positions to market
+    
+    Args:
+        trades_df: DataFrame with trade records (from JSON or CSV)
+        benchmark_prices: Series with daily prices (used for mark-to-market)
+        initial_capital: Initial account balance
+        
+    Returns:
+        DataFrame with columns: Date, Equity
+    """
+    # Initialize tracking
+    cash = initial_capital
+    positions = {}  # {symbol: {'shares': int, 'total_cost': float}}
+    
+    # Sort trades by time
+    trades_df = trades_df.sort_values('time').reset_index(drop=True)
+    
+    # Process trades and build equity curve
+    equity_curve = []
+    dates = []
+    trade_idx = 0
+    
+    # Get date range
+    start_date = trades_df['time'].iloc[0].date()
+    end_date = trades_df['time'].iloc[-1].date()
+    
+    print(f"\nCalculating equity curve from {start_date} to {end_date}...")
+    
+    # Generate date range (trading days only - use benchmark dates + extend to cover all trades)
+    trading_dates = benchmark_prices.index
+    
+    # Filter to date range and convert to list
+    trading_dates = [d for d in trading_dates if start_date <= d.date() <= end_date]
+    
+    # Add a point at the very beginning with initial capital
+    # Find the first trading date before or on start_date
+    first_trading_date = None
+    for d in benchmark_prices.index:
+        if d.date() >= start_date:
+            first_trading_date = d
+            break
+    
+    if first_trading_date is None:
+        first_trading_date = pd.Timestamp(start_date)
+    
+    # Prepend the initial date if it's not already there
+    if len(trading_dates) == 0 or trading_dates[0].date() > start_date:
+        trading_dates = [pd.Timestamp(start_date)] + trading_dates
+    
+    # If last trade date is beyond benchmark data, add it manually
+    if end_date > benchmark_prices.index[-1].date():
+        # Add the missing dates (convert to Timestamp for consistency)
+        current = benchmark_prices.index[-1].date()
+        while current < end_date:
+            current = current + timedelta(days=1)
+            # Only add trading days (Mon-Fri, simplified)
+            if current.weekday() < 5:
+                trading_dates.append(pd.Timestamp(current))
+        
+        print(f"  Extended date range to {end_date} to process all trades")
+    
+    for current_date in trading_dates:
+        # Process all trades that occurred on or before this date (same day included)
+        # Use date comparison to include all trades within the trading day
+        current_date_only = current_date.date() if isinstance(current_date, pd.Timestamp) else current_date
+        
+        while trade_idx < len(trades_df):
+            trade = trades_df.iloc[trade_idx]
+            trade_time = trade['time']  # Already parsed and tz-naive
             
-            # Calculate commission based on Futu's fee structure
-            trade_amount = dealt_qty * dealt_price
+            # Compare dates only (include all trades on current_date)
+            trade_date = trade_time.date() if isinstance(trade_time, pd.Timestamp) else trade_time
             
-            if side == 'BUY':
-                # Buy fees breakdown (no rounding to match exact calculation)
-                commission_fee = max(0.99, dealt_qty * 0.0049)
-                platform_fee = max(1.00, dealt_qty * 0.005)
-                settlement_fee = dealt_qty * 0.003
-                
-                commission = commission_fee + platform_fee + settlement_fee
-                
-                amount = dealt_qty * dealt_price
+            if trade_date > current_date_only:
+                break
+            
+            symbol = trade['symbol']
+            shares = trade['shares']
+            
+            # Determine if BUY or SELL (handle both JSON and CSV formats)
+            if 'type' in trade:
+                # JSON format
+                trade_type = trade['type']
+                amount = trade['amount']
+            else:
+                # CSV format
+                action = trade['action']
+                trade_type = 'BUY' if action in ['BUY', 'ROTATION_BUY_BACK'] else 'SELL'
+                amount = trade['net_value']
+            
+            # Update positions based on trade type
+            if trade_type == 'BUY':
+                # Buy action - decrease cash, increase position
                 cash -= amount
-                cash -= commission  # Deduct commission
-                total_buy_amount += amount
-                total_commission_fee += commission_fee
-                total_platform_fee += platform_fee
-                total_settlement_fee += settlement_fee
-                if code not in positions:
-                    positions[code] = {'qty': 0, 'cost_price': 0}
-                old_qty = positions[code]['qty']
-                new_qty = old_qty + dealt_qty
-                if new_qty > 0:
-                    positions[code]['cost_price'] = (old_qty * positions[code]['cost_price'] + dealt_qty * dealt_price) / new_qty
-                positions[code]['qty'] = new_qty
-            elif side == 'SELL':
-                # Sell fees breakdown (no rounding to match exact calculation)
-                commission_fee = max(0.99, dealt_qty * 0.0049)
-                platform_fee = max(1.00, dealt_qty * 0.005)
-                settlement_fee = dealt_qty * 0.003
-                sec_fee = max(0.01, trade_amount * 0.000008)  # Corrected: 0.000008 not 0.0000278
-                taf_fee = min(max(dealt_qty * 0.000166, 0.01), 8.30)
+                if symbol not in positions:
+                    positions[symbol] = {'shares': 0, 'total_cost': 0}
+                positions[symbol]['shares'] += shares
+                positions[symbol]['total_cost'] += amount
                 
-                commission = commission_fee + platform_fee + settlement_fee + sec_fee + taf_fee
-                
-                amount = dealt_qty * dealt_price
+            else:  # SELL
+                # Sell action - increase cash, decrease position
                 cash += amount
-                cash -= commission  # Deduct commission
-                total_sell_amount += amount
-                total_commission_fee += commission_fee
-                total_platform_fee += platform_fee
-                total_settlement_fee += settlement_fee
-                total_sec_fee += sec_fee
-                total_taf_fee += taf_fee
-                if code not in positions:
-                    positions[code] = {'qty': 0, 'cost_price': 0}
-                positions[code]['qty'] -= dealt_qty
+                if symbol in positions:
+                    # Calculate average cost per share
+                    avg_cost = positions[symbol]['total_cost'] / positions[symbol]['shares'] if positions[symbol]['shares'] > 0 else 0
+                    sold_cost = avg_cost * shares
+                    
+                    positions[symbol]['shares'] -= shares
+                    positions[symbol]['total_cost'] -= sold_cost
+                    
+                    # Remove position if fully closed
+                    if positions[symbol]['shares'] <= 0:
+                        del positions[symbol]
+            
+            trade_idx += 1
         
-        # Calculate position value
-        # For last day, use current market prices; otherwise use cost price
-        is_last_day = (i == len(all_dates) - 1)
-        position_value = 0
+        # Calculate total equity (cash + positions market value)
+        total_equity = cash
         
-        if is_last_day and current_positions:
-            # Use actual current market prices for last day
-            for code, pos in positions.items():
-                if pos['qty'] > 0 and code in current_positions:
-                    position_value += pos['qty'] * current_positions[code]['current_price']
+        # Add market value of all positions (using cost basis since we don't have all symbols' prices)
+        for symbol, pos in positions.items():
+            # Use cost basis for mark-to-market
+            total_equity += pos['total_cost']
+        
+        equity_curve.append(total_equity)
+        dates.append(current_date)
+    
+    # Create DataFrame
+    equity_df = pd.DataFrame({
+        'Date': dates,
+        'Equity': equity_curve
+    })
+    
+    # Debug: Print final state
+    print(f"\n  Final cash: ${cash:,.2f}")
+    print(f"  Final positions: {len(positions)}")
+    if len(positions) > 0:
+        total_position_cost = sum(pos['total_cost'] for pos in positions.values())
+        print(f"  Total position cost: ${total_position_cost:,.2f}")
+        for symbol, pos in positions.items():
+            print(f"    {symbol}: {pos['shares']} shares, cost ${pos['total_cost']:,.2f}")
+    
+    return equity_df
+
+def calculate_metrics(equity_df, initial_capital):
+    """Calculate performance metrics"""
+    
+    # Basic metrics
+    final_equity = equity_df['Equity'].iloc[-1]
+    total_return = (final_equity - initial_capital) / initial_capital * 100
+    
+    # Max drawdown
+    peak = equity_df['Equity'].iloc[0]
+    max_drawdown = 0
+    for equity in equity_df['Equity']:
+        if equity > peak:
+            peak = equity
+        drawdown = (peak - equity) / peak * 100
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+    
+    # Calculate daily returns
+    daily_returns = equity_df['Equity'].pct_change().dropna()
+    
+    # Sharpe Ratio (annualized, assuming 252 trading days)
+    if len(daily_returns) > 0 and daily_returns.std() > 0:
+        sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * (252 ** 0.5)
+    else:
+        sharpe_ratio = 0
+    
+    # Sortino Ratio (annualized)
+    negative_returns = daily_returns[daily_returns < 0]
+    if len(negative_returns) > 0:
+        downside_std = negative_returns.std()
+        if downside_std > 0:
+            sortino_ratio = (daily_returns.mean() / downside_std) * (252 ** 0.5)
         else:
-            # Use cost price as approximation for historical days
-            position_value = sum(pos['qty'] * pos['cost_price'] for pos in positions.values() if pos['qty'] > 0)
+            sortino_ratio = 0
+    else:
+        sortino_ratio = float('inf') if daily_returns.mean() > 0 else 0
+    
+    return {
+        'final_equity': final_equity,
+        'total_return': total_return,
+        'max_drawdown': max_drawdown,
+        'sharpe_ratio': sharpe_ratio,
+        'sortino_ratio': sortino_ratio
+    }
+
+def calculate_benchmark_returns(benchmark_prices, equity_dates):
+    """Calculate benchmark returns aligned with equity curve dates"""
+    
+    # Filter benchmark to same date range
+    start_date = equity_dates.iloc[0]
+    end_date = equity_dates.iloc[-1]
+    
+    # Get prices for the date range
+    mask = (benchmark_prices.index >= start_date) & (benchmark_prices.index <= end_date)
+    prices = benchmark_prices[mask]
+    
+    if len(prices) == 0:
+        return pd.Series(), 0
+    
+    # Calculate returns
+    initial_price = prices.iloc[0]
+    returns = ((prices / initial_price - 1) * 100)  # Convert to percentage
+    
+    # Calculate final return
+    final_return = returns.iloc[-1] if len(returns) > 0 else 0
+    
+    return returns, final_return
+
+def calculate_yearly_returns(equity_df, spy_prices, qqq_prices, initial_capital):
+    """Calculate yearly returns for strategy and benchmarks"""
+    
+    equity_df = equity_df.copy()
+    equity_df['Year'] = equity_df['Date'].dt.year
+    
+    yearly_stats = []
+    previous_end_equity = initial_capital
+    
+    for year in sorted(equity_df['Year'].unique()):
+        year_data = equity_df[equity_df['Year'] == year]
         
-        total_assets = cash + position_value
+        if len(year_data) == 0:
+            continue
         
-        daily_data.append({
-            'date': pd.to_datetime(date),
-            'total_assets': total_assets,
-            'cash': cash,
-            'position_value': position_value
+        # Get start and end dates for this year
+        year_start = year_data['Date'].iloc[0]
+        year_end = year_data['Date'].iloc[-1]
+        
+        # Get equity at start and end
+        # Start equity is the previous year's end equity (or initial capital for first year)
+        start_equity = previous_end_equity
+        end_equity = year_data['Equity'].iloc[-1]
+        
+        # For the current year, get equity at the end
+        previous_end_equity = end_equity
+        
+        # Calculate strategy return
+        strategy_return = (end_equity - start_equity) / start_equity * 100
+        
+        # Get SPY return for the year
+        spy_year = spy_prices[(spy_prices.index >= year_start) & (spy_prices.index <= year_end)]
+        if len(spy_year) > 0:
+            spy_return = (spy_year.iloc[-1] - spy_year.iloc[0]) / spy_year.iloc[0] * 100
+        else:
+            spy_return = 0
+        
+        # Get QQQ return for the year
+        qqq_year = qqq_prices[(qqq_prices.index >= year_start) & (qqq_prices.index <= year_end)]
+        if len(qqq_year) > 0:
+            qqq_return = (qqq_year.iloc[-1] - qqq_year.iloc[0]) / qqq_year.iloc[0] * 100
+        else:
+            qqq_return = 0
+        
+        yearly_stats.append({
+            'year': year,
+            'start_equity': start_equity,
+            'end_equity': end_equity,
+            'strategy_return': strategy_return,
+            'spy_return': spy_return,
+            'qqq_return': qqq_return,
+            'excess_vs_spy': strategy_return - spy_return,
+            'excess_vs_qqq': strategy_return - qqq_return
         })
     
-    df = pd.DataFrame(daily_data)
-    df = df.sort_values('date')
-    
-    # Validation: Compare simulated vs actual current assets
-    if not df.empty:
-        simulated_assets = df['total_assets'].iloc[-1]
-        simulated_cash = df['cash'].iloc[-1]
-        difference = simulated_assets - current_assets
-        difference_pct = (difference / current_assets) * 100
-        
-        print("\n" + "="*60)
-        print("Validation Check")
-        print("="*60)
-        print(f"Simulated Current Assets: ${simulated_assets:,.2f}")
-        print(f"Actual Current Assets:    ${current_assets:,.2f}")
-        print(f"Difference:               ${difference:,.2f} ({difference_pct:+.4f}%)")
-        print(f"\nSimulated Cash:           ${simulated_cash:,.2f}")
-        print(f"Actual Cash:              ${current_cash:,.2f}")
-        print(f"Cash Difference:          ${simulated_cash - current_cash:,.2f}")
-        
-        print(f"\nFee Breakdown:")
-        total_fees = total_commission_fee + total_platform_fee + total_settlement_fee + total_sec_fee + total_taf_fee
-        print(f"  Commission:    ${total_commission_fee:,.2f}")
-        print(f"  Platform Fee:  ${total_platform_fee:,.2f}")
-        print(f"  Settlement:    ${total_settlement_fee:,.2f}")
-        print(f"  SEC Fee:       ${total_sec_fee:,.2f}")
-        print(f"  TAF Fee:       ${total_taf_fee:,.2f}")
-        print(f"  Total Fees:    ${total_fees:,.2f}")
-        
-        # Compare positions
-        print(f"\nPosition Comparison:")
-        for code, sim_pos in positions.items():
-            if sim_pos['qty'] > 0:
-                actual_qty = current_positions.get(code, {}).get('qty', 0)
-                print(f"  {code}: Simulated={sim_pos['qty']:.0f}, Actual={actual_qty:.0f}, Diff={sim_pos['qty']-actual_qty:.0f}")
-        
-        print()
-        if abs(difference_pct) < 0.01:
-            print("✅ Validation PASSED - Excellent match!")
-        elif abs(difference_pct) < 0.2:
-            print("✅ Validation PASSED - Acceptable difference (< 0.2%)")
-            print("   Note: Small discrepancies may be due to system rounding or internal calculations")
-        else:
-            print("❌ Validation FAILED - Large difference detected")
-        print("="*60 + "\n")
-    
-    return df
+    return pd.DataFrame(yearly_stats)
 
-def plot_equity_curve(df):
-    """Plot equity curve"""
-    # Use first day as starting point
-    starting_assets = df['total_assets'].iloc[0]
+def plot_equity_curve():
+    """Main plotting function"""
     
-    # Calculate metrics
-    df['return_pct'] = ((df['total_assets'] / starting_assets) - 1) * 100
-    df['cummax'] = df['total_assets'].cummax()
-    df['drawdown_pct'] = ((df['total_assets'] - df['cummax']) / df['cummax']) * 100
+    print("="*70)
+    print("Account Equity Curve Analysis")
+    print("="*70)
+    print(f"Configuration:")
+    print(f"  Backtest file: {BACKTEST_FILE}")
+    print(f"  Output image: {OUTPUT_IMAGE}")
+    print("="*70)
     
-    # Create plots
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10))
-    fig.suptitle('Account Equity Curve', fontsize=16, fontweight='bold')
+    # Load backtest data
+    trades_df, initial_capital, report = load_backtest_data(BACKTEST_FILE)
     
-    # Plot 1: Total Assets
-    ax1 = axes[0]
-    ax1.plot(df['date'], df['total_assets'], 'b-', linewidth=2, marker='o', markersize=4, label='Total Assets')
-    ax1.axhline(y=starting_assets, color='gray', linestyle='--', alpha=0.5, label=f'Starting Assets')
-    ax1.fill_between(df['date'], starting_assets, df['total_assets'], 
-                      where=(df['total_assets'] >= starting_assets), 
-                      color='green', alpha=0.2)
-    ax1.fill_between(df['date'], starting_assets, df['total_assets'], 
-                      where=(df['total_assets'] < starting_assets), 
-                      color='red', alpha=0.2)
-    ax1.set_ylabel('Total Assets ($)', fontsize=11, fontweight='bold')
-    ax1.legend(loc='best')
-    ax1.grid(True, alpha=0.3)
-    ax1.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'${x:,.0f}'))
-    
-    last_value = df['total_assets'].iloc[-1]
-    last_date = df['date'].iloc[-1]
-    ax1.annotate(f'${last_value:,.0f}', 
-                xy=(last_date, last_value),
-                xytext=(10, 0), textcoords='offset points',
-                fontsize=10, fontweight='bold',
-                bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7))
-    
-    # Plot 2: Cumulative Return
-    ax2 = axes[1]
-    colors = ['green' if x >= 0 else 'red' for x in df['return_pct']]
-    ax2.bar(df['date'], df['return_pct'], color=colors, alpha=0.6, width=0.8)
-    ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.8)
-    ax2.set_ylabel('Cumulative Return (%)', fontsize=11, fontweight='bold')
-    ax2.grid(True, alpha=0.3, axis='y')
-    
-    final_return = df['return_pct'].iloc[-1]
-    ax2.annotate(f'{final_return:+.2f}%', 
-                xy=(last_date, final_return),
-                xytext=(10, 0), textcoords='offset points',
-                fontsize=10, fontweight='bold',
-                bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7))
-    
-    # Plot 3: Drawdown
-    ax3 = axes[2]
-    ax3.fill_between(df['date'], 0, df['drawdown_pct'], color='red', alpha=0.3)
-    ax3.plot(df['date'], df['drawdown_pct'], 'r-', linewidth=1.5, marker='o', markersize=3)
-    ax3.set_ylabel('Drawdown (%)', fontsize=11, fontweight='bold')
-    ax3.set_xlabel('Date', fontsize=11, fontweight='bold')
-    ax3.grid(True, alpha=0.3)
-    
-    max_dd = df['drawdown_pct'].min()
-    max_dd_date = df.loc[df['drawdown_pct'].idxmin(), 'date']
-    ax3.annotate(f'Max DD: {max_dd:.2f}%', 
-                xy=(max_dd_date, max_dd),
-                xytext=(10, -10), textcoords='offset points',
-                fontsize=9,
-                bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.7),
-                arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0'))
-    
-    # Format x-axis
-    for ax in axes:
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
-    
-    # Print stats (use actual last value from df which is the real current assets)
-    actual_last_value = df['total_assets'].iloc[-1]
-    actual_pnl = actual_last_value - starting_assets
-    actual_return = (actual_pnl / starting_assets) * 100
-    
-    print("="*60)
-    print("Account Statistics")
-    print("="*60)
-    print(f"Trading Days: {len(df)}")
-    print(f"Starting Assets: ${starting_assets:,.2f}")
-    print(f"Current Assets: ${actual_last_value:,.2f}")
-    print(f"Total P&L: ${actual_pnl:,.2f}")
-    print(f"Total Return: {actual_return:+.2f}%")
-    print(f"Max Drawdown: {max_dd:.2f}%")
-    print("="*60)
-    
-    plt.tight_layout()
-    plt.savefig('account_equity_curve.png', dpi=300, bbox_inches='tight')
-    print("Chart saved to: account_equity_curve.png")
-    plt.clf()
-
-def main():
-    days = 90
-    orders, current_assets, current_cash, current_positions = get_historical_orders(days=days)
-    df = calculate_daily_equity(orders, current_assets, current_cash, current_positions)
-    
-    if df.empty:
-        print("No data to plot")
+    if trades_df is None:
         return
     
-    print(f"Calculated equity for {len(df)} trading days\n")
-    plot_equity_curve(df)
+    if len(trades_df) == 0:
+        print("Error: No trades found in backtest file")
+        return
+    
+    print(f"  Using initial capital: ${initial_capital:,.2f}")
+    
+    # Load benchmark data
+    spy_prices = load_benchmark_data(SPY_DATA_FILE, 'SPY')
+    qqq_prices = load_benchmark_data(QQQ_DATA_FILE, 'QQQ')
+    
+    if spy_prices is None or qqq_prices is None:
+        print("\nError: Cannot load benchmark data")
+        return
+    
+    # Calculate equity curve (using QQQ prices for date reference)
+    equity_df = calculate_equity_curve(trades_df, qqq_prices, initial_capital)
+    
+    print(f"\nEquity curve calculated:")
+    print(f"  Initial: ${equity_df['Equity'].iloc[0]:,.2f}")
+    print(f"  Final: ${equity_df['Equity'].iloc[-1]:,.2f}")
+    print(f"  Min: ${equity_df['Equity'].min():,.2f}")
+    print(f"  Max: ${equity_df['Equity'].max():,.2f}")
+    
+    # Calculate metrics
+    metrics = calculate_metrics(equity_df, initial_capital)
+    
+    # Calculate benchmark returns
+    spy_returns, spy_final_return = calculate_benchmark_returns(spy_prices, equity_df['Date'])
+    qqq_returns, qqq_final_return = calculate_benchmark_returns(qqq_prices, equity_df['Date'])
+    
+    # Calculate yearly returns
+    yearly_stats = calculate_yearly_returns(equity_df, spy_prices, qqq_prices, initial_capital)
+    
+    # Create plot
+    fig, ax = plt.subplots(figsize=(14, 8))
+    
+    # Calculate strategy returns
+    strategy_returns = ((equity_df['Equity'] / initial_capital - 1) * 100)
+    
+    # Plot returns
+    ax.plot(equity_df['Date'], strategy_returns, 
+            color='#FF6B6B', linewidth=2.5, label='Strategy Return')
+    ax.plot(spy_returns.index, spy_returns.values, 
+            color='#4ECDC4', linewidth=2.5, label='SPY Return')
+    ax.plot(qqq_returns.index, qqq_returns.values, 
+            color='#95E1D3', linewidth=2.5, label='QQQ Return')
+    
+    # Add zero line
+    ax.axhline(y=0, color='black', linestyle='-', alpha=0.3, linewidth=1)
+    
+    # Format axes
+    ax.set_xlabel('Date', fontsize=12)
+    ax.set_ylabel('Return (%)', fontsize=12)
+    
+    # Determine title based on file name
+    if 'v7' in BACKTEST_FILE.lower():
+        title = 'V7 Strategy vs SPY vs QQQ - Returns Comparison (with MA Filter)\n'
+    elif 'v6' in BACKTEST_FILE.lower():
+        title = 'V6 Strategy vs SPY vs QQQ - Returns Comparison\n'
+    else:
+        title = 'Strategy vs SPY vs QQQ - Returns Comparison\n'
+    
+    ax.set_title(title, fontsize=14, pad=15)
+    
+    # Format y-axis as percentage
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:+.1f}%'))
+    
+    # Format x-axis
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    fig.autofmt_xdate()
+    
+    # Grid
+    ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
+    
+    # Legend
+    ax.legend(loc='upper left', fontsize=11)
+    
+    # Statistics box
+    stats_text = f'Initial Capital: ${initial_capital:,.0f}\n'
+    stats_text += f'Final Equity: ${metrics["final_equity"]:,.0f}\n'
+    stats_text += f'Strategy Return: {metrics["total_return"]:+.2f}%\n'
+    stats_text += f'SPY Return: {spy_final_return:+.2f}%\n'
+    stats_text += f'QQQ Return: {qqq_final_return:+.2f}%\n'
+    stats_text += f'Excess vs SPY: {metrics["total_return"] - spy_final_return:+.2f}%\n'
+    stats_text += f'Excess vs QQQ: {metrics["total_return"] - qqq_final_return:+.2f}%\n'
+    stats_text += f'Max Drawdown: -{metrics["max_drawdown"]:.2f}%\n'
+    stats_text += '─────────────────────────\n'
+    stats_text += f'Sharpe Ratio: {metrics["sharpe_ratio"]:.2f}\n'
+    if metrics["sortino_ratio"] == float('inf'):
+        stats_text += 'Sortino Ratio: N/A'
+    else:
+        stats_text += f'Sortino Ratio: {metrics["sortino_ratio"]:.2f}'
+    
+    props = dict(boxstyle='round', facecolor='lightblue', alpha=0.8)
+    ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', bbox=props, family='monospace')
+    
+    # Add final return annotations
+    final_strategy_return = strategy_returns.iloc[-1]
+    ax.text(equity_df['Date'].iloc[-1], final_strategy_return, 
+            f'  {final_strategy_return:+.1f}%',
+            verticalalignment='center', fontsize=10, color='#FF6B6B', weight='bold')
+    
+    if len(spy_returns) > 0:
+        ax.text(spy_returns.index[-1], spy_returns.iloc[-1],
+                f'  {spy_returns.iloc[-1]:+.1f}%',
+                verticalalignment='center', fontsize=10, color='#4ECDC4', weight='bold')
+    
+    if len(qqq_returns) > 0:
+        ax.text(qqq_returns.index[-1], qqq_returns.iloc[-1],
+                f'  {qqq_returns.iloc[-1]:+.1f}%',
+                verticalalignment='center', fontsize=10, color='#95E1D3', weight='bold')
+    
+    plt.tight_layout()
+    
+    # Save figure
+    plt.savefig(OUTPUT_IMAGE, dpi=300, bbox_inches='tight')
+    print(f"\nChart saved to: {OUTPUT_IMAGE}")
+    
+    # Print backtest report if available (from JSON)
+    if report:
+        print("\n" + "="*100)
+        print("BACKTEST REPORT (from JSON)")
+        print("="*100)
+        for section, values in report.items():
+            print(f"\n{section}")
+            for key, value in values.items():
+                print(f"  {key}: {value}")
+    
+    # Print performance summary
+    print("\n" + "="*100)
+    print("PERFORMANCE SUMMARY (from equity curve)")
+    print("="*100)
+    print(f"\nOverall Performance:")
+    print(f"  Strategy Return:   {metrics['total_return']:>10.2f}%")
+    print(f"  SPY Return:        {spy_final_return:>10.2f}%")
+    print(f"  QQQ Return:        {qqq_final_return:>10.2f}%")
+    print(f"  Excess vs SPY:     {metrics['total_return'] - spy_final_return:>10.2f}%")
+    print(f"  Excess vs QQQ:     {metrics['total_return'] - qqq_final_return:>10.2f}%")
+    
+    print(f"\nRisk Metrics:")
+    print(f"  Max Drawdown:      {metrics['max_drawdown']:>10.2f}%")
+    print(f"  Sharpe Ratio:      {metrics['sharpe_ratio']:>10.2f}")
+    if metrics['sortino_ratio'] == float('inf'):
+        print(f"  Sortino Ratio:     {'N/A':>10}")
+    else:
+        print(f"  Sortino Ratio:     {metrics['sortino_ratio']:>10.2f}")
+    
+    # Print yearly returns
+    print("\n" + "="*100)
+    print("YEARLY RETURNS")
+    print("="*100)
+    print(f"{'Year':<6} {'Start Equity':<15} {'End Equity':<15} {'Strategy':<11} {'SPY':<11} {'QQQ':<11} {'vs SPY':<11} {'vs QQQ':<11}")
+    print("-"*100)
+    
+    for _, row in yearly_stats.iterrows():
+        print(f"{row['year']:<6} ${row['start_equity']:>13,.0f}  ${row['end_equity']:>13,.0f}  "
+              f"{row['strategy_return']:>+9.2f}%  {row['spy_return']:>+9.2f}%  "
+              f"{row['qqq_return']:>+9.2f}%  {row['excess_vs_spy']:>+9.2f}%  "
+              f"{row['excess_vs_qqq']:>+9.2f}%")
+    
+    print("="*100)
+    
+    # Show plot
+    plt.show()
+
+def main():
+    """Main function"""
+    plot_equity_curve()
 
 if __name__ == "__main__":
     main()

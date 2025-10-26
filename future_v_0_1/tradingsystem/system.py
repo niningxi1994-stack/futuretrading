@@ -84,7 +84,7 @@ class TradingSystem:
         if self.strategy_name == 'v6':
             from strategy.v6 import StrategyV6 as StrategyClass
         elif self.strategy_name == 'v7':
-            from strategy.stategy_v7 import StrategyV7 as StrategyClass
+            from strategy.v7 import StrategyV7 as StrategyClass
         else:
             self.logger.error(f"未知策略: {self.strategy_name}，使用默认 v6")
             from strategy.v6 import StrategyV6 as StrategyClass
@@ -143,7 +143,10 @@ class TradingSystem:
             
             self.logger.info(f"历史期权数据入库完成: 成功 {success_count}/{len(historical_options)} 条")
         
-        self.logger.info(f"系统初始化完成 [监控: {config.option_monitor.watch_dir}, 间隔: {self.check_interval}s]")
+        self.logger.info(
+            f"系统初始化完成 [策略: {self.strategy_name}, 监控: {config.option_monitor.watch_dir}, "
+            f"间隔: {self.check_interval}s]"
+        )
     
     def _recover_state(self):
         """
