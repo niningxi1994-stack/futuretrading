@@ -2,15 +2,13 @@
 V7 事件驱动期权流动量策略 - 支持高杠杆的中长线期权流策略
 
 核心特性：
-1. 历史Premium过滤：只交易超过历史均值2倍的期权流
-2. 杠杆支持：最大1.95倍杠杆，允许负现金至-100%
-3. Entry Delay：信号后2分钟买入
-4. 严格风控：止损-10%，止盈+20%
-5. 黑名单机制：15天内不重复交易
+见config_v7.yaml
 """
 
 import logging
 import csv
+import pandas as pd
+import pytz
 from datetime import date, datetime, time, timedelta
 from typing import Optional, Dict
 from zoneinfo import ZoneInfo
@@ -43,6 +41,9 @@ class StrategyV7(StrategyBase):
         self.historical_lookback_days = filter_cfg.get('historical_lookback_days', 7)  # 回溯天数
         self.call_csv_dir = Path(filter_cfg.get('call_csv_dir', 'call_csv_files'))  # CSV目录
         
+        # 做空Premium倍数过滤
+        self.max_daily_short_premium_multiplier = filter_cfg.get('max_daily_short_premium_multiplier', 0)  # 做空倍数
+        
         # === 仓位配置 ===
         position_cfg = strategy_cfg.get('position_compute', {})
         self.max_daily_trades = position_cfg.get('max_daily_trades', 5)  # 每日最大交易次数
@@ -50,43 +51,98 @@ class StrategyV7(StrategyBase):
         self.max_single_position = position_cfg.get('max_single_position', 0.40)  # 单笔仓位上限
         self.premium_divisor = position_cfg.get('premium_divisor', 800000)  # 仓位计算除数
         
-        # === 杠杆配置 ===
-        leverage_cfg = strategy_cfg.get('leverage', {})
-        self.min_cash_ratio = leverage_cfg.get('min_cash_ratio', -1.0)  # 最低现金比率（-100%）
-        self.max_leverage = leverage_cfg.get('max_leverage', 1.95)  # 最大杠杆倍数
+        # === 杠杆配置（已禁用）===
+        # 不使用杠杆，通过max_daily_position控制仓位
         
         # === 出场配置 ===
         self.stop_loss = strategy_cfg.get('stop_loss', 0.10)  # 止损 -10%
         self.take_profit = strategy_cfg.get('take_profit', 0.20)  # 止盈 +20%
+        self.trailing_stop = strategy_cfg.get('trailing_stop', 0.15)  # 追踪止损 -15%（从最高价回撤）
+        self.enable_trailing_stop = strategy_cfg.get('enable_trailing_stop', True)  # 是否启用追踪止损
         self.holding_days = strategy_cfg.get('holding_days', 6)  # 持仓天数
         self.exit_time = strategy_cfg.get('exit_time', '15:00:00')  # 定时退出时间
         
         # === 黑名单配置 ===
         self.blacklist_days = strategy_cfg.get('blacklist_days', 15)  # 黑名单天数
         
-        # === 交易成本 ===
-        cost_cfg = strategy_cfg.get('cost', {})
-        self.commission_per_share = cost_cfg.get('commission_per_share', 0.005)  # 每股手续费
-        self.min_commission = cost_cfg.get('min_commission', 1.0)  # 最低手续费
-        self.slippage = cost_cfg.get('slippage', 0.001)  # 单边滑点 0.1%
+        # === 交易成本（由client处理，策略不关心）===
+        # 实盘：无滑点手续费
+        # 回测：client会应用滑点和手续费
         
         # === 运行时状态 ===
         self.daily_trade_count = 0  # 当日交易计数
         self.blacklist: Dict[str, datetime] = {}  # 黑名单：{symbol: 买入时间}
+        self.highest_price_map: Dict[str, float] = {}  # 追踪止损：{symbol: 历史最高价}
+        
+        # === QQQ MA数据加载 ===
+        self.qqq_ma_data = None
+        self.enable_ma_filter = strategy_cfg.get('enable_ma_filter', True)  # 是否启用MA过滤
+        if self.enable_ma_filter:
+            self._load_qqq_ma_data()
         
         # 打印配置信息
+        trailing_info = f", 追踪止损{self.trailing_stop:.0%}" if self.enable_trailing_stop else ""
         self.logger.info(
             f"StrategyV7 初始化完成:\n"
             f"  入场: 时间>={self.trade_start_time}, 延迟{self.entry_delay}分钟, "
-            f"溢价>=${self.min_option_premium/1000:.0f}K, 历史{self.historical_premium_multiplier}倍\n"
+            f"溢价>=${self.min_option_premium/1000:.0f}K\n"
             f"  仓位: 日限{self.max_daily_trades}次, 总仓<={self.max_daily_position:.0%}, "
             f"单仓<={self.max_single_position:.0%}\n"
-            f"  杠杆: 现金>={self.min_cash_ratio:.0%}, 杠杆<={self.max_leverage:.2f}x\n"
-            f"  出场: 止盈{self.take_profit:+.0%}, 止损{self.stop_loss:+.0%}, "
+            f"  出场: 止盈{self.take_profit:+.0%}, 固定止损{self.stop_loss:+.0%}{trailing_info}, "
             f"持{self.holding_days}日@{self.exit_time}\n"
-            f"  黑名单: {self.blacklist_days}日, 成本: ${self.commission_per_share}/股, "
-            f"滑点{self.slippage:.1%}"
+            f"  黑名单: {self.blacklist_days}日"
         )
+
+    def _load_qqq_ma_data(self):
+        """加载QQQ MA数据"""
+        try:
+            # 尝试从多个位置加载
+            possible_paths = [
+                Path('future_v_0_1/database/qqq_ma_data.csv'),
+                Path('database/qqq_ma_data.csv'),
+                Path(__file__).parent.parent / 'database' / 'qqq_ma_data.csv'
+            ]
+            
+            for ma_file in possible_paths:
+                if ma_file.exists():
+                    # 读取CSV，自动解析日期列为index
+                    self.qqq_ma_data = pd.read_csv(ma_file, index_col=0, parse_dates=True)
+                    
+                    # 确保index是datetime类型
+                    if not isinstance(self.qqq_ma_data.index, pd.DatetimeIndex):
+                        self.qqq_ma_data.index = pd.to_datetime(self.qqq_ma_data.index)
+                    
+                    # 去除时区信息（如果有）
+                    if self.qqq_ma_data.index.tz is not None:
+                        self.qqq_ma_data.index = self.qqq_ma_data.index.tz_localize(None)
+                    
+                    self.logger.info(
+                        f"✅ QQQ MA数据加载成功: {ma_file} "
+                        f"({len(self.qqq_ma_data)}条记录, "
+                        f"{self.qqq_ma_data.index[0].date()} 至 {self.qqq_ma_data.index[-1].date()})"
+                    )
+                    
+                    # 检查最新状态
+                    latest = self.qqq_ma_data.iloc[-1]
+                    is_bullish = latest['bullish_alignment']
+                    self.logger.info(
+                        f"  最新交易日({self.qqq_ma_data.index[-1].date()}): "
+                        f"{'多头排列 ✓' if is_bullish else '非多头排列 ✗'} "
+                        f"(MA20=${latest['MA20']:.2f}, MA60=${latest['MA60']:.2f})"
+                    )
+                    return
+            
+            # 如果所有路径都失败
+            self.logger.warning(
+                "⚠️  未找到QQQ MA数据文件，MA过滤将被禁用。"
+                "请运行: python download_spy_ma.py"
+            )
+            self.enable_ma_filter = False
+            
+        except Exception as e:
+            self.logger.error(f"❌ 加载QQQ MA数据失败: {e}，MA过滤将被禁用")
+            self.qqq_ma_data = None
+            self.enable_ma_filter = False
 
     def on_start(self):
         """策略启动"""
@@ -143,13 +199,23 @@ class StrategyV7(StrategyBase):
             )
             return None
         
-        # ===== 3. 历史Premium过滤（新增）=====
+        # ===== 3. QQQ MA多头排列过滤（新增）=====
+        if self.enable_ma_filter:
+            if not self._check_qqq_bullish_alignment(ev.event_time_et):
+                return None
+        
+        # ===== 4. 历史Premium过滤 =====
         # 回测时跳过（由回测引擎处理），通过检查 call_csv_dir 是否存在来判断
         if self.call_csv_dir.exists():
             if not self._check_historical_premium(ev.symbol, ev.premium_usd, ev.event_time_et):
                 return None
         
-        # ===== 4. 黑名单过滤 =====
+        # ===== 5. 做空Premium倍数过滤 =====
+        if self.call_csv_dir.exists() and self.max_daily_short_premium_multiplier > 0:
+            if not self._check_daily_short_premium(ev.symbol, ev.premium_usd, ev.event_time_et):
+                return None
+        
+        # ===== 6. 黑名单过滤 =====
         if ev.symbol in self.blacklist:
             last_buy_time = self.blacklist[ev.symbol]
             days_since = (ev.event_time_et - last_buy_time).days
@@ -163,14 +229,14 @@ class StrategyV7(StrategyBase):
                 # 黑名单已过期，移除
                 del self.blacklist[ev.symbol]
         
-        # ===== 5. 每日交易次数限制 =====
+        # ===== 7. 每日交易次数限制 =====
         if self.daily_trade_count >= self.max_daily_trades:
             self.logger.info(
                 f"过滤: {ev.symbol} 今日已达交易上限 {self.daily_trade_count}/{self.max_daily_trades}"
             )
             return None
         
-        # ===== 6. 获取账户信息 =====
+        # ===== 8. 获取账户信息 =====
         acc_info = market_client.get_account_info()
         if not acc_info:
             self.logger.error("获取账户信息失败")
@@ -179,7 +245,7 @@ class StrategyV7(StrategyBase):
         total_assets = acc_info['total_assets']
         cash = acc_info['cash']
         
-        # ===== 7. 获取股票价格（Entry Delay处理）=====
+        # ===== 9. 获取股票价格（Entry Delay处理）=====
         # 计算延迟后的买入时间
         entry_time_et = ev.event_time_et + timedelta(minutes=self.entry_delay)
         
@@ -199,32 +265,26 @@ class StrategyV7(StrategyBase):
         # 恢复市场时间为信号时刻（避免影响后续逻辑）
         market_client.set_current_time(ev.event_time_et)
         
-        # ===== 8. 计算仓位比例 =====
+        # ===== 10. 计算仓位比例 =====
         pos_ratio = min(ev.premium_usd / self.premium_divisor, self.max_single_position)
         
-        # ===== 9. 计算股数（用基准价，不含滑点）=====
+        # ===== 11. 计算股数=====
         target_value = total_assets * pos_ratio
-        qty = int(target_value / current_price)  # 用基准价计算股数
-        
-        # 应用滑点（买入时价格上浮）
-        buy_price = current_price * (1 + self.slippage)
+        qty = int(target_value / current_price)
         
         if qty <= 0:
             self.logger.debug(f"过滤: {ev.symbol} 计算股数为0")
             return None
         
-        actual_cost = buy_price * qty
-        
-        # 计算手续费
-        commission = max(qty * self.commission_per_share, self.min_commission)
-        total_cost = actual_cost + commission
+        # 计算目标价值
+        target_cost = current_price * qty
         
         self.logger.debug(
             f"仓位计算: 溢价${ev.premium_usd:,.0f} → 仓位{pos_ratio:.1%} → "
-            f"{qty}股 × ${buy_price:.2f} = ${actual_cost:,.2f} (含手续费${commission:.2f})"
+            f"{qty}股 × ${current_price:.2f} = ${target_cost:,.2f}"
         )
         
-        # ===== 10. 检查总仓位限制 =====
+        # ===== 12. 检查总仓位限制 =====
         positions = market_client.get_positions()
         current_position_value = 0
         
@@ -237,8 +297,9 @@ class StrategyV7(StrategyBase):
                 
                 current_position_value += pos.get('market_value', 0)
         
-        # current_position_ratio = current_position_value / total_assets  # 当前仓位比例（暂未使用）
-        new_total_position_ratio = (current_position_value + actual_cost) / total_assets
+        # 检查总仓位限制
+        new_total_position_value = current_position_value + target_cost
+        new_total_position_ratio = new_total_position_value / total_assets
         
         if new_total_position_ratio > self.max_daily_position:
             self.logger.info(
@@ -247,59 +308,103 @@ class StrategyV7(StrategyBase):
             )
             return None
         
-        # ===== 11. 检查杠杆限制 =====
-        # 计算交易后的现金比率
-        cash_after = cash - total_cost
-        cash_ratio_after = cash_after / total_assets
-        
-        if cash_ratio_after < self.min_cash_ratio:
+        # ===== 13. 检查现金充足性 =====
+        if cash < target_cost:
             self.logger.info(
-                f"过滤: {ev.symbol} 现金比率将低于下限 {cash_ratio_after:.1%} < "
-                f"{self.min_cash_ratio:.0%}"
+                f"过滤: {ev.symbol} 现金不足 需要${target_cost:,.2f}, 剩余${cash:,.2f}"
             )
             return None
         
-        # 计算交易后的杠杆倍数（用基准价计算仓位价值，不含滑点）
-        position_value_no_slippage = qty * current_price  # 用基准价
-        position_value_after = current_position_value + position_value_no_slippage
-        total_assets_after = cash_after + position_value_after  # 交易后的总资产
-        leverage_after = position_value_after / total_assets_after if total_assets_after > 0 else 0
-        
-        if leverage_after > self.max_leverage:
-            self.logger.info(
-                f"过滤: {ev.symbol} 杠杆倍数将超限 {leverage_after:.1%} > {self.max_leverage:.0%}"
-            )
-            return None
-        
-        # ===== 12. 生成开仓决策 =====
+        # ===== 14. 生成开仓决策 =====
         client_id = f"{ev.symbol}_{ev.event_time_et.strftime('%Y%m%d%H%M%S')}"
         
         self.logger.info(
-            f"✓ 开仓决策: {ev.symbol} {qty}股 @${buy_price:.2f} "
-            f"(仓位{pos_ratio:.1%}, 溢价${ev.premium_usd:,.0f}, "
-            f"历史倍数{self.historical_premium_multiplier}x, "
-            f"杠杆{leverage_after:.2f}x)"
+            f"✓ 开仓决策: {ev.symbol} {qty}股 @${current_price:.2f} "
+            f"(仓位{pos_ratio:.1%}, 溢价${ev.premium_usd:,.0f})"
         )
         
         return EntryDecision(
             symbol=ev.symbol,
             shares=qty,
-            price_limit=buy_price,
-            t_exec_et=entry_time_et,  # 使用延迟后的买入时刻
+            price_limit=current_price,  # 基准价，client会应用滑点（回测）
+            t_exec_et=entry_time_et,
             pos_ratio=pos_ratio,
             client_id=client_id,
             meta={
                 'event_id': ev.event_id,
                 'premium_usd': ev.premium_usd,
                 'signal_time': ev.event_time_et.isoformat(),
-                'entry_delay': self.entry_delay,
-                'buy_price_no_slippage': current_price,
-                'slippage': self.slippage,
-                'commission': commission,
-                'leverage': leverage_after,
-                'cash_ratio_after': cash_ratio_after
+                'entry_delay': self.entry_delay
             }
         )
+
+    def _check_qqq_bullish_alignment(self, signal_time: datetime) -> bool:
+        """
+        检查QQQ是否呈多头排列（MA20 > MA60）
+        
+        重要：使用信号当天之前（前一个交易日）的MA数据，避免看到未来
+        
+        Args:
+            signal_time: 信号时间（美东时区，从北京时间转换而来）
+            
+        Returns:
+            bool: True=多头排列，允许交易; False=非多头排列，不交易
+        """
+        if self.qqq_ma_data is None:
+            self.logger.warning("QQQ MA数据未加载，跳过MA过滤")
+            return True  # 容错：数据未加载时允许交易
+        
+        try:
+            # Step 1: 将signal_time转换为tz-naive datetime
+            if isinstance(signal_time, datetime):
+                if signal_time.tzinfo is not None:
+                    # 带时区（美东时区），去除时区信息保留时间值
+                    signal_time_naive = signal_time.replace(tzinfo=None)
+                else:
+                    signal_time_naive = signal_time
+            else:
+                # 如果传入的就是date，转换为datetime
+                signal_time_naive = datetime.combine(signal_time, datetime.min.time())
+            
+            # Step 2: 获取信号日期，并往前推一天（取前一个交易日的MA）
+            # 因为当天的MA是基于当天收盘价计算的，盘中还没有，所以要用前一天的
+            signal_date = signal_time_naive.date()
+            
+            # Step 3: 转换为pandas Timestamp并设置为当天的00:00:00（tz-naive）
+            # 然后查找严格小于这个时间的MA数据（即前一个交易日或更早）
+            signal_timestamp = pd.Timestamp(signal_date)
+            
+            # 查找严格小于signal_timestamp的数据（即前一天或更早）
+            valid_data = self.qqq_ma_data[self.qqq_ma_data.index < signal_timestamp]
+            
+            if len(valid_data) == 0:
+                self.logger.warning(
+                    f"无法找到{signal_date}之前的QQQ MA数据，允许交易（容错）"
+                )
+                return True
+            
+            # Step 4: 获取最近的一天数据（前一个交易日）
+            latest_ma = valid_data.iloc[-1]
+            latest_date = valid_data.index[-1].date()
+            is_bullish = latest_ma['bullish_alignment']
+            
+            # Step 5: 返回结果
+            if is_bullish:
+                self.logger.debug(
+                    f"✓ QQQ多头排列检查通过 (信号日{signal_date}, 使用前一日{latest_date}的MA): "
+                    f"MA20=${latest_ma['MA20']:.2f} > MA60=${latest_ma['MA60']:.2f}"
+                )
+                return True
+            else:
+                self.logger.info(
+                    f"过滤: QQQ非多头排列 (信号日{signal_date}, 使用前一日{latest_date}的MA): "
+                    f"MA20=${latest_ma['MA20']:.2f} ≤ MA60=${latest_ma['MA60']:.2f}"
+                )
+                return False
+                
+        except Exception as e:
+            self.logger.warning(f"检查QQQ多头排列异常，允许交易（容错）: {e}")
+            return True
 
     def _check_historical_premium(self, symbol: str, current_premium: float, 
                                    signal_time: datetime) -> bool:
@@ -371,14 +476,141 @@ class StrategyV7(StrategyBase):
             self.logger.warning(f"{symbol} 历史过滤异常，允许交易: {e}")
             return True
 
-    def on_position_check(self, market_client=None, entry_time_map=None):
+    def _check_daily_short_premium(self, symbol: str, current_premium: float, 
+                                     signal_time: datetime) -> bool:
         """
-        检查持仓，生成平仓决策
+        检查当天做空premium总和是否超过当前交易的倍数
+        
+        Args:
+            symbol: 股票代码
+            current_premium: 当前期权溢价
+            signal_time: 信号时间
+            
+        Returns:
+            bool: True=通过过滤, False=不通过（被过滤）
+        """
+        try:
+            # 如果倍数为0，禁用此过滤
+            if self.max_daily_short_premium_multiplier <= 0:
+                return True
+            
+            # 查找当天的历史CSV文件
+            signal_date = signal_time.date() if hasattr(signal_time, 'date') else signal_time
+            csv_pattern = f"{symbol}_{signal_date.strftime('%Y-%m-%d')}_ET.csv"
+            csv_file = self.call_csv_dir / csv_pattern
+            
+            if not csv_file.exists():
+                # 没有当天历史数据，允许交易
+                self.logger.debug(f"{symbol} 无当天历史CSV，跳过做空过滤")
+                return True
+            
+            # 统计当天做空交易的premium总和
+            short_sum = 0
+            short_list = []
+            
+            # 移除时区信息以便比较
+            signal_time_naive = signal_time.replace(tzinfo=None) if hasattr(signal_time, 'tzinfo') and signal_time.tzinfo else signal_time
+            
+            with open(csv_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    try:
+                        # 解析时间
+                        date_str = row.get('date', '')
+                        time_str = row.get('time', '')
+                        if not date_str or not time_str:
+                            continue
+                        
+                        datetime_str = f"{date_str} {time_str}"
+                        row_time_cn = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M:%S')
+                        
+                        # 转换为ET时区
+                        cn_tz = pytz.timezone('Asia/Shanghai')
+                        row_time_cn = cn_tz.localize(row_time_cn)
+                        et_tz = pytz.timezone('America/New_York')
+                        row_time_et = row_time_cn.astimezone(et_tz).replace(tzinfo=None)
+                        
+                        # 只统计在信号时间之前的交易
+                        if row_time_et >= signal_time_naive:
+                            continue
+                        
+                        # 获取premium
+                        premium_str = row.get('premium', '0').replace(',', '')
+                        premium = float(premium_str)
+                        
+                        # 过滤掉小额premium
+                        if premium <= 100000:
+                            continue
+                        
+                        # 判断是否为做空交易
+                        side = row.get('side', '').upper()
+                        option_type = row.get('option_type', '').lower()
+                        
+                        # 做空：ASK PUT 或 BID CALL
+                        if (side == 'ASK' and option_type == 'put') or (side == 'BID' and option_type == 'call'):
+                            short_sum += premium
+                            short_list.append((row_time_et.strftime('%H:%M'), side, option_type, premium))
+                    
+                    except Exception as e:
+                        self.logger.debug(f"解析行失败: {e}")
+                        continue
+            
+            # 计算阈值
+            threshold = current_premium * self.max_daily_short_premium_multiplier
+            
+            # 判断是否超过阈值
+            if short_sum >= threshold:
+                # 构建做空交易详情（最多显示3笔）
+                trades_detail = ', '.join([f"{t} {s} {o.upper()} ${p:,.0f}" for t, s, o, p in short_list[:3]])
+                if len(short_list) > 3:
+                    trades_detail += f" ...等{len(short_list)}笔"
+                
+                self.logger.info(
+                    f"过滤: {symbol} 做空倍数过滤 当天做空总和${short_sum:,.0f} >= "
+                    f"当前交易${current_premium:,.0f} × {self.max_daily_short_premium_multiplier} "
+                    f"({trades_detail})"
+                )
+                return False
+            else:
+                self.logger.debug(
+                    f"✓ 做空过滤通过: {symbol} 当天做空总和${short_sum:,.0f} < "
+                    f"阈值${threshold:,.0f} (当前${current_premium:,.0f} × {self.max_daily_short_premium_multiplier})"
+                )
+                return True
+                
+        except Exception as e:
+            # 容错：如果过滤逻辑出错，允许交易
+            self.logger.warning(f"{symbol} 做空过滤异常，允许交易: {e}")
+            return True
+
+    def on_minute_check(self, market_client=None, entry_time_map=None):
+        """
+        每分钟检查持仓（实盘和回测统一调用）
         
         出场优先级：
-        1. 定时退出（持仓第N天下午3:00）
-        2. 止损（-10%）
-        3. 止盈（+20%）
+        1. 固定止损（-5%）
+        2. 追踪止损（-10% from highest）
+        3. 固定止盈（+50%）
+        4. 定时退出（第6天下午3:00）
+        
+        Args:
+            market_client: 市场数据客户端实例
+            entry_time_map: 持仓开仓时间映射 {symbol: entry_time_str}
+            
+        Returns:
+            List[ExitDecision]: 平仓决策列表
+        """
+        return self.on_position_check(market_client, entry_time_map)
+    
+    def on_position_check(self, market_client=None, entry_time_map=None):
+        """
+        检查持仓，生成平仓决策（兼容旧接口）
+        
+        出场优先级：
+        1. 固定止损（-5%）
+        2. 追踪止损（-10% from highest）
+        3. 固定止盈（+50%）
+        4. 定时退出（第6天下午3:00）
         
         Args:
             market_client: 市场数据客户端实例
@@ -398,8 +630,16 @@ class StrategyV7(StrategyBase):
         if entry_time_map is None:
             entry_time_map = {}
         
+        # DEBUG: Log entry_time_map for debugging (only if changed)
+        # if entry_time_map and len(entry_time_map) > 0:
+        #     self.logger.info(f"[DEBUG] entry_time_map keys: {list(entry_time_map.keys())}")
+        
         exit_decisions = []
-        current_et = datetime.now(ZoneInfo('America/New_York'))
+        # Use backtest time if available, otherwise use current system time
+        if hasattr(market_client, 'current_time') and market_client.current_time:
+            current_et = market_client.current_time
+        else:
+            current_et = datetime.now(ZoneInfo('America/New_York'))
         exit_time_today = datetime.strptime(self.exit_time, '%H:%M:%S').time()
         
         for pos in positions:
@@ -413,68 +653,50 @@ class StrategyV7(StrategyBase):
                 self._check_pending_orders(symbol, market_client)
                 continue
             
-            # 应用滑点（卖出时价格下浮）
-            sell_price = current_price * (1 - self.slippage)
+            # 计算盈亏比例（使用当前价格，不含滑点）
+            # 注意：滑点由client应用
+            pnl_ratio = (current_price - cost_price) / cost_price
             
-            # 计算盈亏比例
-            pnl_ratio = (sell_price - cost_price) / cost_price
+            # 更新历史最高价（用于追踪止损）
+            if symbol not in self.highest_price_map:
+                # 首次记录，使用成本价作为初始值
+                self.highest_price_map[symbol] = max(cost_price, current_price)
+            else:
+                # 更新最高价
+                self.highest_price_map[symbol] = max(self.highest_price_map[symbol], current_price)
             
             # ===== 1. 优先检查定时退出 =====
             if symbol in entry_time_map:
                 exit_decision = self._check_timed_exit(
-                    symbol, can_sell_qty, cost_price, sell_price, 
+                    symbol, can_sell_qty, cost_price, current_price, 
                     pnl_ratio, entry_time_map[symbol], current_et, 
                     exit_time_today, market_client
                 )
                 if exit_decision:
                     exit_decisions.append(exit_decision)
+                    # 清除最高价记录
+                    if symbol in self.highest_price_map:
+                        del self.highest_price_map[symbol]
                     continue  # 定时退出后不再检查止损止盈
+            else:
+                pass  # Symbol not in entry_time_map, skip timed exit check
             
-            # ===== 2. 止损检查 =====
-            if pnl_ratio <= -self.stop_loss:
-                self.logger.info(
-                    f"✓ 平仓决策[止损]: {symbol} {can_sell_qty}股 @${sell_price:.2f} "
-                    f"(成本${cost_price:.2f}, 亏损{pnl_ratio:.1%})"
-                )
-                exit_decisions.append(ExitDecision(
-                    symbol=symbol,
-                    shares=can_sell_qty,
-                    price_limit=sell_price,
-                    reason='stop_loss',
-                    client_id=f"{symbol}_SL_{current_et.strftime('%Y%m%d%H%M%S')}",
-                    meta={
-                        'pnl_ratio': pnl_ratio,
-                        'cost_price': cost_price,
-                        'sell_price': sell_price,
-                        'slippage': self.slippage
-                    }
-                ))
-                continue
+            # 检查出场条件（20秒检查频率，直接用当前价格）
+            exit_decision = self._check_exit_conditions(
+                symbol, can_sell_qty, cost_price, current_price, 
+                pnl_ratio, current_et
+            )
             
-            # ===== 3. 止盈检查 =====
-            if pnl_ratio >= self.take_profit:
-                self.logger.info(
-                    f"✓ 平仓决策[止盈]: {symbol} {can_sell_qty}股 @${sell_price:.2f} "
-                    f"(成本${cost_price:.2f}, 盈利{pnl_ratio:.1%})"
-                )
-                exit_decisions.append(ExitDecision(
-                    symbol=symbol,
-                    shares=can_sell_qty,
-                    price_limit=sell_price,
-                    reason='take_profit',
-                    client_id=f"{symbol}_TP_{current_et.strftime('%Y%m%d%H%M%S')}",
-                    meta={
-                        'pnl_ratio': pnl_ratio,
-                        'cost_price': cost_price,
-                        'sell_price': sell_price,
-                        'slippage': self.slippage
-                    }
-                ))
+            if exit_decision:
+                exit_decisions.append(exit_decision)
+                # 清除最高价记录
+                if symbol in self.highest_price_map:
+                    del self.highest_price_map[symbol]
         
         return exit_decisions
 
     def _check_timed_exit(self, symbol: str, can_sell_qty: int, cost_price: float,
-                         sell_price: float, pnl_ratio: float, entry_time_str: str,
+                         current_price: float, pnl_ratio: float, entry_time_str: str,
                          current_et: datetime, exit_time_today: time,
                          market_client) -> Optional[ExitDecision]:
         """
@@ -484,7 +706,7 @@ class StrategyV7(StrategyBase):
             symbol: 股票代码
             can_sell_qty: 可卖数量
             cost_price: 成本价
-            sell_price: 卖出价（已包含滑点）
+            current_price: 当前价格（基准价，不含滑点）
             pnl_ratio: 盈亏比例
             entry_time_str: 开仓时间字符串
             current_et: 当前美东时间
@@ -515,13 +737,13 @@ class StrategyV7(StrategyBase):
                 # 只在退出日期的退出时间或之后平仓
                 if current_date >= exit_date and current_et.time() >= exit_time_today:
                     self.logger.info(
-                        f"✓ 平仓决策[定时退出]: {symbol} {can_sell_qty}股 @${sell_price:.2f} "
+                        f"✓ 平仓决策[定时退出]: {symbol} {can_sell_qty}股 @${current_price:.2f} "
                         f"(成本${cost_price:.2f}, 持仓{trading_days_held}日, 盈亏{pnl_ratio:+.1%})"
                     )
                     return ExitDecision(
                         symbol=symbol,
                         shares=can_sell_qty,
-                        price_limit=sell_price,
+                        price_limit=current_price,  # 基准价，client会应用滑点
                         reason='timed_exit',
                         client_id=f"{symbol}_TD_{current_et.strftime('%Y%m%d%H%M%S')}",
                         meta={
@@ -530,7 +752,7 @@ class StrategyV7(StrategyBase):
                             'entry_date': entry_date.isoformat(),
                             'exit_date': exit_date.isoformat(),
                             'cost_price': cost_price,
-                            'sell_price': sell_price
+                            'current_price': current_price
                         }
                     )
                 elif trading_days_held >= self.holding_days:
@@ -659,6 +881,116 @@ class StrategyV7(StrategyBase):
         except Exception as e:
             self.logger.error(f"查询 {symbol} 订单失败: {e}")
 
+    def _check_exit_conditions(self, symbol: str, can_sell_qty: int, 
+                               cost_price: float, current_price: float, 
+                               pnl_ratio: float, current_et: datetime) -> Optional[ExitDecision]:
+        """
+        检查止损、追踪止损和止盈条件（20秒检查频率）
+        
+        Args:
+            symbol: 股票代码
+            can_sell_qty: 可卖数量
+            cost_price: 成本价
+            current_price: 当前价格（基准价，不含滑点）
+            pnl_ratio: 盈亏比例
+            current_et: 当前美东时间
+            
+        Returns:
+            ExitDecision 或 None
+        """
+        # 20秒检查频率，直接用当前价格
+        low_price = current_price
+        high_price = current_price
+        
+        # 计算各个出场价位
+        stop_loss_price = cost_price * (1 - self.stop_loss)
+        trailing_stop_price = self.highest_price_map.get(symbol, cost_price) * (1 - self.trailing_stop)
+        take_profit_price = cost_price * (1 + self.take_profit)
+        
+        # ===== 1. 固定止损检查 =====
+        if low_price <= stop_loss_price:
+            self.logger.info(
+                f"✓ 平仓决策[固定止损]: {symbol} {can_sell_qty}股 @${low_price:.2f} "
+                f"(成本${cost_price:.2f}, 止损价${stop_loss_price:.2f}, 亏损{pnl_ratio:.1%})"
+            )
+            exit_decisions = [ExitDecision(
+                symbol=symbol,
+                shares=can_sell_qty,
+                price_limit=low_price,  # 使用Low价成交
+                reason='stop_loss',
+                client_id=f"{symbol}_SL_{current_et.strftime('%Y%m%d%H%M%S')}",
+                meta={
+                    'pnl_ratio': pnl_ratio,
+                    'cost_price': cost_price,
+                    'current_price': current_price,
+                    'exit_price': low_price,
+                    'stop_loss_price': stop_loss_price
+                }
+            )]
+            # 清除最高价记录
+            if symbol in self.highest_price_map:
+                del self.highest_price_map[symbol]
+            return exit_decisions[0]
+        
+        # ===== 2. 追踪止损检查 =====
+        if self.enable_trailing_stop and low_price <= trailing_stop_price:
+            highest_price = self.highest_price_map.get(symbol, cost_price)
+            drawdown_from_high = (highest_price - low_price) / highest_price
+            
+            self.logger.info(
+                f"✓ 平仓决策[追踪止损]: {symbol} {can_sell_qty}股 @${low_price:.2f} "
+                f"(最高${highest_price:.2f}, 回撤{drawdown_from_high:.1%}, 成本${cost_price:.2f})"
+            )
+            exit_decisions = [ExitDecision(
+                symbol=symbol,
+                shares=can_sell_qty,
+                price_limit=low_price,  # 使用Low价成交
+                reason='trailing_stop',
+                client_id=f"{symbol}_TS_{current_et.strftime('%Y%m%d%H%M%S')}",
+                meta={
+                    'pnl_ratio': pnl_ratio,
+                    'cost_price': cost_price,
+                    'current_price': current_price,
+                    'exit_price': low_price,
+                    'highest_price': highest_price,
+                    'trailing_stop_price': trailing_stop_price,
+                    'drawdown_from_high': drawdown_from_high
+                }
+            )]
+            # 清除最高价记录
+            if symbol in self.highest_price_map:
+                del self.highest_price_map[symbol]
+            return exit_decisions[0]
+        
+        # ===== 3. 止盈检查 =====
+        if high_price >= take_profit_price:
+            highest_price = self.highest_price_map.get(symbol, current_price)
+            self.logger.info(
+                f"✓ 平仓决策[止盈]: {symbol} {can_sell_qty}股 @${high_price:.2f} "
+                f"(成本${cost_price:.2f}, 止盈价${take_profit_price:.2f}, 盈利{pnl_ratio:.1%}, 最高${highest_price:.2f})"
+            )
+            exit_decisions = [ExitDecision(
+                symbol=symbol,
+                shares=can_sell_qty,
+                price_limit=high_price,  # 使用High价成交
+                reason='take_profit',
+                client_id=f"{symbol}_TP_{current_et.strftime('%Y%m%d%H%M%S')}",
+                meta={
+                    'pnl_ratio': pnl_ratio,
+                    'cost_price': cost_price,
+                    'current_price': current_price,
+                    'exit_price': high_price,
+                    'highest_price': highest_price,
+                    'take_profit_price': take_profit_price
+                }
+            )]
+            # 清除最高价记录
+            if symbol in self.highest_price_map:
+                del self.highest_price_map[symbol]
+            return exit_decisions[0]
+        
+        return None
+
     def on_order_filled(self, res):
         """订单成交回调"""
         self.logger.info(
@@ -707,7 +1039,8 @@ if __name__ == '__main__':
     print("\n✓ StrategyV7 测试成功")
     print(f"  日交易次数上限: {strategy.max_daily_trades}")
     print(f"  单笔仓位上限: {strategy.max_single_position:.0%}")
-    print(f"  最大杠杆: {strategy.max_leverage:.2f}x")
+    print(f"  每日总仓位上限: {strategy.max_daily_position:.0%}")
     print(f"  止损/止盈: {strategy.stop_loss:.0%} / {strategy.take_profit:.0%}")
+    print(f"  追踪止损: {strategy.trailing_stop:.0%}" if strategy.enable_trailing_stop else "  追踪止损: 禁用")
     print(f"  持仓天数: {strategy.holding_days}")
 
