@@ -20,6 +20,8 @@ class SignalEvent:
     chain_id: Optional[str]
     event_time_cn: datetime
     event_time_et: datetime
+    stock_price: Optional[float] = None  # 期权数据中的股票价格（用于备用方案）
+    metadata: Optional[Dict] = None  # 元数据（包含历史期权数据等）
 
 
 @dataclass
@@ -57,6 +59,8 @@ class PositionView:
     open_time_et: datetime
     exit_due_et: datetime
     meta: Dict[str, Any]
+    highest_price_since_entry: Optional[float] = None  # 买入以来的最高价格（用于动态止损）
+    current_price: Optional[float] = None  # 当前价格（用于动态止损计算）
 
 
 @dataclass

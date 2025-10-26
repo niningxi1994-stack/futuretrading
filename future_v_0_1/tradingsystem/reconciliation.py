@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 class DailyReconciliation:
     """每日对账类"""
     
-    def __init__(self, db, market_client, logger=None, auto_fix=True):
+    def __init__(self, db, market_client, logger=None, auto_fix=True, strategy_config=None):
         """
         初始化对账模块
         
@@ -21,11 +21,13 @@ class DailyReconciliation:
             market_client: FutuClient 实例
             logger: 日志记录器
             auto_fix: 是否自动修复差异（默认True，以Futu数据为准）
+            strategy_config: 策略配置（用于计算预计平仓时间）
         """
         self.db = db
         self.market_client = market_client
         self.logger = logger or logging.getLogger(self.__class__.__name__)
         self.auto_fix = auto_fix
+        self.strategy_config = strategy_config or {}
         
         # 对账过程中收集的问题和修复操作
         self.issues = []
@@ -213,7 +215,7 @@ class DailyReconciliation:
     
     def _check_orders(self, trading_date: str) -> Dict:
         """
-        订单对账：检查当日订单状态
+        订单对账：检查当日订单状态，并同步Futu订单状态
         
         Args:
             trading_date: 交易日期
@@ -236,9 +238,24 @@ class DailyReconciliation:
             self.logger.info(f"    - 待成交: {len(pending_orders)}")
             self.logger.info(f"    - 已失败: {len(failed_orders)}")
             
-            # 检查未成交订单（可能需要人工处理）
+            # 同步待成交订单状态
+            synced_orders = 0
             if pending_orders:
-                self.logger.warning(f"  ⚠️  存在 {len(pending_orders)} 个未成交订单:")
+                self.logger.info(f"\n  正在同步 {len(pending_orders)} 个待成交订单状态...")
+                synced_orders = self._sync_pending_orders(pending_orders)
+                
+                # 重新查询更新后的订单状态
+                if synced_orders > 0:
+                    today_orders = self.db.get_orders_by_date(trading_date)
+                    pending_orders = [o for o in today_orders if o['status'] == 'PENDING']
+                    filled_orders = [o for o in today_orders if o['status'] == 'FILLED']
+                    
+                    self.logger.info(f"  已同步 {synced_orders} 个订单状态")
+                    self.logger.info(f"  更新后状态: 已成交 {len(filled_orders)}, 待成交 {len(pending_orders)}")
+            
+            # 检查仍未成交的订单（可能需要人工处理）
+            if pending_orders:
+                self.logger.warning(f"\n  ⚠️  存在 {len(pending_orders)} 个未成交订单:")
                 for order in pending_orders:
                     self.logger.warning(
                         f"    - {order['symbol']} {order['order_type']} "
@@ -254,6 +271,7 @@ class DailyReconciliation:
                 'filled_orders': len(filled_orders),
                 'pending_orders': len(pending_orders),
                 'failed_orders': len(failed_orders),
+                'synced_orders': synced_orders,
                 'pending_order_list': [
                     {
                         'order_id': o['order_id'],
@@ -461,6 +479,169 @@ class DailyReconciliation:
         except Exception as e:
             self.logger.error(f"    ✗ 修复 {symbol} 持仓失败: {e}")
     
+    def _sync_pending_orders(self, pending_orders: List[Dict]) -> int:
+        """
+        同步待成交订单状态，从Futu查询最新状态
+        
+        Args:
+            pending_orders: 待成交订单列表
+            
+        Returns:
+            int: 同步成功的订单数量
+        """
+        synced_count = 0
+        
+        try:
+            # 查询Futu订单列表（最近7天）
+            from datetime import timedelta
+            
+            end_date = datetime.now(ZoneInfo('America/New_York')).date()
+            start_date = end_date - timedelta(days=7)
+            
+            futu_orders = self.market_client.get_order_list(
+                start_date=start_date.strftime('%Y-%m-%d'),
+                end_date=end_date.strftime('%Y-%m-%d')
+            )
+            
+            if not futu_orders:
+                self.logger.warning("    无法从Futu获取订单列表，跳过订单同步")
+                return 0
+            
+            # 创建Futu订单映射（按股票代码+订单类型）
+            futu_order_map = {}
+            for order in futu_orders:
+                key = f"{order['code']}_{order['trd_side']}"
+                if key not in futu_order_map:
+                    futu_order_map[key] = []
+                futu_order_map[key].append(order)
+            
+            # 同步每个待成交订单
+            for db_order in pending_orders:
+                symbol = db_order['symbol']
+                order_type = db_order['order_type']
+                order_id = db_order['order_id']
+                shares = db_order['shares']
+                
+                # 构建查询键
+                trd_side = 'BUY' if order_type == 'BUY' else 'SELL'
+                key = f"{symbol}_{trd_side}"
+                
+                # 查找匹配的Futu订单
+                if key in futu_order_map:
+                    matched_order = None
+                    
+                    for futu_order in futu_order_map[key]:
+                        # 匹配条件：股票代码、订单类型、股数相同
+                        if (futu_order['code'] == symbol and 
+                            futu_order['trd_side'] == trd_side and 
+                            abs(futu_order['qty'] - shares) < 0.01):  # 数量近似相等
+                            matched_order = futu_order
+                            break
+                    
+                    if matched_order:
+                        futu_status = matched_order['order_status']
+                        
+                        # 将Futu状态映射为本地状态
+                        if futu_status in ['FILLED_ALL', 'FILLED_PART']:
+                            new_status = 'FILLED'
+                        elif futu_status in ['CANCELLED_ALL', 'CANCELLED_PART', 'FAILED', 'DELETED']:
+                            new_status = 'FAILED'
+                        else:
+                            new_status = 'PENDING'
+                        
+                        # 如果状态变化，更新数据库
+                        if new_status != 'PENDING':
+                            # 获取成交时间和成交价格
+                            filled_time = None
+                            filled_price = None
+                            filled_shares = None
+                            
+                            if new_status == 'FILLED':
+                                filled_price = matched_order.get('dealt_avg_price')
+                                filled_shares = matched_order.get('dealt_qty', shares)
+                                # 成交时间（如果有）
+                                if matched_order.get('updated_time'):
+                                    filled_time = matched_order['updated_time']
+                            
+                            # 更新订单状态（包括成交价格）
+                            self.db.update_order_status(
+                                order_id=order_id,
+                                status=new_status,
+                                filled_time=filled_time,
+                                filled_price=filled_price,
+                                filled_shares=filled_shares
+                            )
+                            
+                            synced_count += 1
+                            
+                            self.logger.info(
+                                f"    ✓ {symbol} {order_type} 订单已更新: "
+                                f"PENDING → {new_status} "
+                                f"(Futu状态: {futu_status})"
+                            )
+                            
+                            # 记录修复动作
+                            action = {
+                                'action': 'sync_order_status',
+                                'order_id': order_id,
+                                'symbol': symbol,
+                                'order_type': order_type,
+                                'old_status': 'PENDING',
+                                'new_status': new_status,
+                                'futu_status': futu_status
+                            }
+                            self.fix_actions.append(action)
+                
+        except Exception as e:
+            self.logger.error(f"    ✗ 订单同步失败: {e}", exc_info=True)
+        
+        return synced_count
+    
+    def _calculate_expected_exit_time(self, entry_time_str: str) -> str:
+        """
+        计算预计平仓时间
+        
+        Args:
+            entry_time_str: 买入时间字符串（ISO格式）
+            
+        Returns:
+            str: 预计平仓时间字符串
+        """
+        try:
+            from datetime import timedelta
+            
+            # 解析买入时间
+            entry_time_dt = datetime.fromisoformat(entry_time_str)
+            if entry_time_dt.tzinfo is None:
+                entry_time_dt = entry_time_dt.replace(tzinfo=ZoneInfo('America/New_York'))
+            else:
+                entry_time_dt = entry_time_dt.astimezone(ZoneInfo('America/New_York'))
+            
+            # 获取策略配置
+            holding_days = self.strategy_config.get('holding_days', 6)
+            exit_time_str = self.strategy_config.get('holding_days_exit_time', '15:00:00')
+            
+            # 简单估算：N个交易日后（不考虑节假日，只排除周末）
+            exit_date = entry_time_dt.date()
+            trading_days_added = 0
+            
+            while trading_days_added < holding_days:
+                exit_date += timedelta(days=1)
+                # 跳过周末
+                if exit_date.weekday() < 5:  # 周一到周五
+                    trading_days_added += 1
+            
+            # 组合日期和时间
+            exit_time = datetime.strptime(exit_time_str, '%H:%M:%S').time()
+            expected_exit_dt = datetime.combine(exit_date, exit_time)
+            expected_exit_dt = expected_exit_dt.replace(tzinfo=ZoneInfo('America/New_York'))
+            
+            return expected_exit_dt.strftime('%m-%d %H:%M')
+            
+        except Exception as e:
+            self.logger.debug(f"计算预计平仓时间失败: {e}")
+            return "N/A"
+    
     def _fix_missing_position_in_futu(self, symbol: str):
         """
         修复Futu中不存在的持仓（数据库标记为已平仓）
@@ -623,15 +804,17 @@ class DailyReconciliation:
             self.logger.info(f"\n  持仓明细:")
             self.logger.info(
                 f"    {'股票':6s} {'股数':>6s} {'成本价':>9s} {'现价':>9s} "
-                f"{'成本':>12s} {'市值':>12s} {'盈亏':>10s} {'比例':>8s}"
+                f"{'成本':>12s} {'市值':>12s} {'盈亏':>10s} {'比例':>8s} "
+                f"{'买入时间':>13s} {'预计平仓':>13s}"
             )
-            self.logger.info("    " + "-" * 76)
+            self.logger.info("    " + "-" * 106)
             
             for pos in positions:
                 symbol = pos['symbol']
                 shares = pos['shares']
                 entry_price = pos['entry_price']
                 cost = entry_price * shares
+                entry_time = pos.get('entry_time', '')
                 
                 # 获取实时价格
                 if symbol in futu_price_map:
@@ -650,11 +833,16 @@ class DailyReconciliation:
                 
                 pnl_sign = '+' if pnl >= 0 else ''
                 
+                # 格式化时间
+                entry_time_str = entry_time[:16].replace('T', ' ') if entry_time else 'N/A'
+                expected_exit = self._calculate_expected_exit_time(entry_time) if entry_time else 'N/A'
+                
                 self.logger.info(
                     f"    {symbol:6s} {shares:6d} "
                     f"${entry_price:8.2f} ${current_price:8.2f} "
                     f"${cost:11,.2f} ${market_value:11,.2f} "
-                    f"{pnl_sign}${pnl:9,.2f} {pnl_sign}{pnl_ratio:7.1%}"
+                    f"{pnl_sign}${pnl:9,.2f} {pnl_sign}{pnl_ratio:7.1%} "
+                    f"{entry_time_str:13s} {expected_exit:13s}"
                 )
             
             # 汇总
@@ -725,7 +913,8 @@ class DailyReconciliation:
                     'cost': cost,
                     'market_value': market_value,
                     'pnl': pnl,
-                    'pnl_ratio': pnl_ratio
+                    'pnl_ratio': pnl_ratio,
+                    'entry_time': pos.get('entry_time', '')
                 })
             
             # 按盈亏金额排序（从高到低）
@@ -735,18 +924,25 @@ class DailyReconciliation:
             self.logger.info(f"\n  浮盈浮亏明细:")
             self.logger.info(
                 f"    {'股票':6s} {'股数':>6s} {'成本价':>9s} {'现价':>9s} "
-                f"{'成本':>12s} {'市值':>12s} {'浮盈':>11s} {'比例':>8s}"
+                f"{'成本':>12s} {'市值':>12s} {'浮盈':>11s} {'比例':>8s} "
+                f"{'买入时间':>13s} {'预计平仓':>13s}"
             )
-            self.logger.info("    " + "-" * 80)
+            self.logger.info("    " + "-" * 110)
             
             for detail in pnl_details:
                 pnl_sign = '+' if detail['pnl'] >= 0 else ''
+                
+                # 格式化时间
+                entry_time = detail.get('entry_time', '')
+                entry_time_str = entry_time[:16].replace('T', ' ') if entry_time else 'N/A'
+                expected_exit = self._calculate_expected_exit_time(entry_time) if entry_time else 'N/A'
                 
                 self.logger.info(
                     f"    {detail['symbol']:6s} {detail['shares']:6d} "
                     f"${detail['entry_price']:8.2f} ${detail['current_price']:8.2f} "
                     f"${detail['cost']:11,.2f} ${detail['market_value']:11,.2f} "
-                    f"{pnl_sign}${detail['pnl']:10,.2f} {pnl_sign}{detail['pnl_ratio']:7.1%}"
+                    f"{pnl_sign}${detail['pnl']:10,.2f} {pnl_sign}{detail['pnl_ratio']:7.1%} "
+                    f"{entry_time_str:13s} {expected_exit:13s}"
                 )
             
             # 汇总

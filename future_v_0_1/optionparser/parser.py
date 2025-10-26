@@ -13,9 +13,9 @@ from tqdm import tqdm
 
 # 处理导入（支持相对导入和直接运行）
 try:
-    from .utils import parse_unusualwhales_page
+    from .utils import parse_unusualwhales_page, parse_option_csv
 except ImportError:
-    from utils import parse_unusualwhales_page
+    from utils import parse_unusualwhales_page, parse_option_csv
 
 # 配置日志
 logging.basicConfig(
@@ -23,6 +23,8 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class OptionData:
@@ -33,13 +35,14 @@ class OptionData:
     # strike: float
     option_type: str
     contract: str
-    # stock_price: float
+    stock_price: float  # 恢复此字段用于备用价格方案
     # bid: float
     # ask: float
     # spot: float
     # size: float
     premium: float
     # volume: float
+    metadata: dict = field(default_factory=dict, hash=False, compare=False)  # 元数据，不参与哈希和比较
 
 
 
@@ -84,59 +87,100 @@ class OptionMonitor:
             self.logger.info(f"已创建持久化目录: {self.persistant_dir}")
 
         _files = sorted([str(f) for f in Path(self.watch_dir).rglob('*') if f.is_file()], key=os.path.getctime)
-        self.files = [val for val in _files if val.endswith("txt")]
+        self.files = [val for val in _files if val.endswith("txt") or val.endswith("csv")]
         self.logger.info(f"找到 {len(self.files)} 个待处理文件")
 
     def monitor_one_round(self):
         new_option_trade = []
         current_files = sorted(
-            [str(f) for f in Path(self.watch_dir).rglob('*.txt') if f.is_file()],
+            [str(f) for f in Path(self.watch_dir).rglob('*') if f.is_file() and (f.suffix == '.txt' or f.suffix == '.csv')],
             key=os.path.getctime
         )
                 
-                # 找出新增的文件（未处理的）
+        # 找出新增的文件（未处理的）
         new_files = [f for f in current_files if f not in self.processed_files]
                 
         if new_files:
             self.logger.info(f"发现 {len(new_files)} 个新文件")
                     
         for file in new_files:
-            # 解析文件
-            records = parse_unusualwhales_page(file)
+            # 记录新文件信息
+            file_name = os.path.basename(file)
+            self.logger.info(f"处理新文件: {file_name}")
             
-            # 记录原始数量
-            original_count = len(self.option_tradings)
-            
-            # 处理每条记录
-            for record in records:
+            # 判断文件格式并解析
+            if file.endswith('.csv'):
+                # CSV 格式处理
+                result = parse_option_csv(file)
+                if not result:
+                    self.logger.warning(f"  文件为空或解析失败，跳过")
+                    self.processed_files.add(file)
+                    continue
+                
+                option_data = result['primary']
+                history_count = len(result['historical'])
+                self.logger.info(f"  CSV 格式：解析出 1 条主数据 + {history_count} 条历史数据")
+                
+            else:
+                # TXT 格式处理（原有逻辑）
+                records = parse_unusualwhales_page(file)
+                self.logger.info(f"  TXT 格式：解析出 {len(records)} 条期权记录")
+                
+                if len(records) == 0:
+                    self.logger.warning(f"  文件为空，跳过")
+                    self.processed_files.add(file)
+                    continue
+                
+                # 第1条记录作为主数据
+                first_record = records[0]
+                
+                # 第2+条记录作为历史数据
+                history_data = []
+                if len(records) > 1:
+                    for record in records[1:]:
+                        history_data.append({
+                            'time': record['time'].isoformat(),
+                            'symbol': record['ticker'],
+                            'side': record['side'],
+                            'option_type': record['option_type'],
+                            'contract': record['contract'],
+                            'stock_price': record['stock_price'],
+                            'premium': record['premium']
+                        })
+                
+                # 创建 OptionData（一个文件一个对象）
                 option_data = OptionData(
-                    time=record['time'],
-                    symbol=record['ticker'],
-                    side=record['side'],
-                    # strike=record['strike'],
-                    option_type=record['option_type'],
-                    contract=record['contract'],
-                    # stock_price=record['stock_price'],
-                    # bid=record['bid'],
-                    # ask=record['ask'],
-                    # spot=record['spot'],
-                    # size=record['size'],
-                    premium=record['premium'],
-                    # volume=record['volume']
+                    time=first_record['time'],
+                    symbol=first_record['ticker'],
+                    side=first_record['side'],
+                    option_type=first_record['option_type'],
+                    contract=first_record['contract'],
+                    stock_price=first_record['stock_price'],
+                    premium=first_record['premium'],
+                    metadata={
+                        'history_option_data': history_data,  # 历史数据列表
+                        'total_records': len(records)         # 总记录数
+                    }
+                )
+                history_count = len(history_data)
+            
+            # 去重判断
+            if option_data not in self.option_tradings:
+                new_option_trade.append(option_data)
+                self.option_tradings.add(option_data)
+                
+                self.logger.info(
+                    f"  新增期权信号: {option_data.symbol} {option_data.option_type}/{option_data.side} "
+                    f"权利金=${option_data.premium:,.0f} 股价=${option_data.stock_price:.2f}"
                 )
                 
-                # 判断是否为新增数据
-                if option_data not in self.option_tradings:
-                    new_option_trade.append(option_data)
-                    self.option_tradings.add(option_data)
-
-                    self.logger.debug(
-                        f"新增: {option_data.symbol} {option_data.option_type} "
-                        f"${option_data.strike} 权利金=${option_data.premium:,.0f}"
-                    )
-            
-            # 统计新增数量
-            new_count = len(self.option_tradings) - original_count
+                if history_count > 0:
+                    self.logger.info(f"  包含历史数据: {history_count} 条")
+                
+                new_count = 1
+            else:
+                self.logger.info(f"  重复信号，跳过")
+                new_count = 0
             
             # 标记文件为已处理
             self.processed_files.add(file)
@@ -144,79 +188,117 @@ class OptionMonitor:
             # 保存到数据库（如果有数据库实例）
             if self.db:
                 try:
+                    records_count = 1 + history_count if file.endswith('.csv') else len(records)
                     self.db.save_processed_file(
                         file_path=file,
-                        records_count=len(records),
+                        records_count=records_count,
                         new_signals_count=new_count
                     )
                 except Exception as e:
                     self.logger.warning(f"保存文件处理记录失败: {e}")
             
-            if new_count > 0:
-                self.logger.debug(
-                    f"文件: {os.path.basename(file)}, 新增 {new_count} 条"
-                )
+            # 总结日志
+            self.logger.info(
+                f"  文件处理完成: 新增信号{new_count}个 (含{history_count}条历史数据)"
+            )
         return new_option_trade
                             
-
     def parse_history_data(self):
         """
         解析历史数据文件（只处理未处理过的文件）
+        
+        Returns:
+            List[OptionData]: 所有解析出的期权数据（包括重复的）
         """
+        all_option_data = []  # 存储所有解析出的期权数据
+        
         # 过滤出未处理的文件
         unprocessed_files = [f for f in self.files if f not in self.processed_files]
         
         if not unprocessed_files:
             self.logger.info(f"历史文件已全部处理: {len(self.processed_files)}/{len(self.files)}")
-            return
+            return all_option_data
         
         self.logger.info(f"开始解析历史数据: {len(unprocessed_files)}/{len(self.files)} 个未处理文件")
 
         for idx in tqdm(range(len(unprocessed_files)), desc="解析进度"):
             file = unprocessed_files[idx]
-            records = parse_unusualwhales_page(file)
             
-            # 统计新增数量
-            original_count = len(self.option_tradings)
-            
-            # 创建 OptionData 对象
-            for record in records:
+            # 根据文件格式选择解析器
+            if file.endswith('.csv'):
+                # CSV 格式处理
+                result = parse_option_csv(file)
+                if not result:
+                    self.processed_files.add(file)
+                    continue
+                
+                option_data = result['primary']
+                history_count = len(result['historical'])
+                
+            else:
+                # TXT 格式处理
+                records = parse_unusualwhales_page(file)
+                
+                if len(records) == 0:
+                    self.processed_files.add(file)
+                    continue
+                
+                # 第1条记录作为主数据
+                first_record = records[0]
+                
+                # 第2+条记录作为历史数据
+                history_data = []
+                if len(records) > 1:
+                    for record in records[1:]:
+                        history_data.append({
+                            'time': record['time'].isoformat(),
+                            'symbol': record['ticker'],
+                            'side': record['side'],
+                            'option_type': record['option_type'],
+                            'contract': record['contract'],
+                            'stock_price': record['stock_price'],
+                            'premium': record['premium']
+                        })
+                
+                # 创建 OptionData（一个文件一个对象）
                 option_data = OptionData(
-                    time=record['time'],
-                    symbol=record['ticker'],
-                    side=record['side'],
-                    # strike=record['strike'],
-                    option_type=record['option_type'],
-                    contract=record['contract'],
-                    # stock_price=record['stock_price'],
-                    # bid=record['bid'],
-                    # ask=record['ask'],
-                    # spot=record['spot'],
-                    # size=record['size'],
-                    premium=record['premium'],
-                    # volume=record['volume']
+                    time=first_record['time'],
+                    symbol=first_record['ticker'],
+                    side=first_record['side'],
+                    option_type=first_record['option_type'],
+                    contract=first_record['contract'],
+                    stock_price=first_record['stock_price'],
+                    premium=first_record['premium'],
+                    metadata={
+                        'history_option_data': history_data,
+                        'total_records': len(records)
+                    }
                 )
-                self.option_tradings.add(option_data)
+                history_count = len(history_data)
             
-            # 标记为已处理
+            # 判断是否为新数据（用于去重统计）
+            new_count = 0
+            if option_data not in self.option_tradings:
+                self.option_tradings.add(option_data)
+                new_count = 1
+                all_option_data.append(option_data)
+            
+            # 标记文件为已处理
             self.processed_files.add(file)
             
-            # 保存到数据库（如果有数据库实例）
-            new_count = len(self.option_tradings) - original_count
+            # 保存到数据库
             if self.db:
                 try:
+                    records_count = 1 + history_count if file.endswith('.csv') else len(records)
                     self.db.save_processed_file(
                         file_path=file,
-                        records_count=len(records),
+                        records_count=records_count,
                         new_signals_count=new_count
                     )
                 except Exception as e:
-                    self.logger.warning(f"保存文件处理记录失败: {e}")
+                    pass
         
-        self.logger.info(
-            f"历史数据解析完成: 新增{len(unprocessed_files)}个文件, "
-            f"总记录{len(self.option_tradings)}条"
-        )            
+        return all_option_data
 
 if __name__ == '__main__':
     from datetime import datetime

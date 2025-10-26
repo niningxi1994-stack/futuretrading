@@ -8,17 +8,33 @@ import logging
 from pathlib import Path
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
+from typing import Dict
 
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.config import SystemConfig
 from optionparser.parser import OptionMonitor
-from strategy.v6 import StrategyV6
 from strategy.strategy import StrategyContext, SignalEvent
 from market.futu_client import FutuClient
 from database.models import DatabaseManager
 from tradingsystem.reconciliation import DailyReconciliation
+
+
+def normalize_symbol(symbol: str, market: str = 'US') -> str:
+    """
+    标准化股票代码，确保包含市场前缀
+    
+    Args:
+        symbol: 股票代码
+        market: 市场代码（默认US）
+        
+    Returns:
+        str: 标准化后的股票代码（如 US.AAPL）
+    """
+    if '.' not in symbol:
+        return f'{market}.{symbol}'
+    return symbol
 
 
 def get_et_date() -> date:
@@ -61,13 +77,26 @@ class TradingSystem:
             db=self.db  # 传递数据库实例
         )
         
-        # 初始化策略
+        # 初始化策略（根据配置动态加载）
+        self.strategy_name = config.raw_config.get('strategy', {}).get('name', 'v6')
+        
+        # 动态导入策略模块
+        if self.strategy_name == 'v6':
+            from strategy.v6 import StrategyV6 as StrategyClass
+        elif self.strategy_name == 'v7':
+            from strategy.stategy_v7 import StrategyV7 as StrategyClass
+        else:
+            self.logger.error(f"未知策略: {self.strategy_name}，使用默认 v6")
+            from strategy.v6 import StrategyV6 as StrategyClass
+            self.strategy_name = 'v6'
+        
         # 使用配置对象中保存的原始配置字典
         strategy_context = StrategyContext(
             cfg=config.raw_config,  # 使用完整配置字典
-            logger=logging.getLogger('StrategyV6')
+            logger=logging.getLogger(f'Strategy{self.strategy_name.upper()}')
         )
-        self.strategy = StrategyV6(strategy_context)
+        self.strategy = StrategyClass(strategy_context)
+        self.logger.info(f"策略已加载: {self.strategy_name.upper()}")
         
         # 市场数据客户端
         self.market_client = market_client
@@ -76,21 +105,43 @@ class TradingSystem:
         self.check_interval = config.system.check_interval
         
         # 初始化对账模块
+        strategy_config = {
+            'holding_days': config.raw_config.get('strategy', {}).get('holding_days', 6),
+            'holding_days_exit_time': config.raw_config.get('strategy', {}).get('holding_days_exit_time', '15:00:00')
+        }
         self.reconciliation = DailyReconciliation(
             db=self.db,
             market_client=self.market_client,
             logger=logging.getLogger('Reconciliation'),
-            auto_fix=config.system.reconciliation.auto_fix
+            auto_fix=config.system.reconciliation.auto_fix,
+            strategy_config=strategy_config
         )
         
         # 对账时间配置
         self.reconciliation_time = config.system.reconciliation.time
         
+        # 初始化持仓最高价字典（用于动态止损）
+        self.position_highest_prices: Dict[str, float] = {}
+        
         # 恢复系统状态
         self._recover_state()
         
         # 在恢复状态后，处理历史数据（此时 processed_files 已从数据库恢复）
-        self.option_monitor.parse_history_data()
+        self.logger.info("开始处理历史期权数据...")
+        historical_options = self.option_monitor.parse_history_data()
+        
+        # 将历史期权数据入库（但不生成买入订单，由策略的历史信号过滤器处理）
+        if historical_options:
+            self.logger.info(f"开始入库 {len(historical_options)} 条历史期权数据...")
+            success_count = 0
+            for option_data in historical_options:
+                try:
+                    self._process_signal(option_data)
+                    success_count += 1
+                except Exception as e:
+                    self.logger.error(f"处理历史期权数据失败: {option_data.symbol} {e}")
+            
+            self.logger.info(f"历史期权数据入库完成: 成功 {success_count}/{len(historical_options)} 条")
         
         self.logger.info(f"系统初始化完成 [监控: {config.option_monitor.watch_dir}, 间隔: {self.check_interval}s]")
     
@@ -136,7 +187,23 @@ class TradingSystem:
         processed_files = self.db.get_processed_files()
         self.option_monitor.processed_files = set(processed_files)
         
-        # 4. 校验持仓信息
+        # 4. 恢复持仓最高价
+        db_positions = self.db.get_all_open_positions()
+        for pos in db_positions:
+            symbol = pos['symbol']
+            highest_price = pos.get('highest_price')
+            entry_price = pos.get('entry_price', 0)
+            
+            # 初始化最高价为 max(entry_price, highest_price from DB)
+            if highest_price and highest_price > 0:
+                self.position_highest_prices[symbol] = highest_price
+            else:
+                # 如果数据库没有记录，使用开仓价
+                self.position_highest_prices[symbol] = entry_price
+            
+            self.logger.debug(f"恢复 {symbol} 最高价: ${self.position_highest_prices[symbol]:.2f}")
+        
+        # 校验持仓信息
         db_positions = self.db.get_all_open_positions()
         futu_positions = self.market_client.get_positions()
         
@@ -169,11 +236,18 @@ class TradingSystem:
     def _save_strategy_state(self):
         """保存策略状态到数据库（使用美东时间）"""
         today = get_et_date().isoformat()
+        
+        # 将 blacklist 中的 datetime 对象转换为 ISO 格式字符串（JSON 可序列化）
+        blacklist_serializable = {
+            symbol: dt.isoformat() if isinstance(dt, datetime) else dt
+            for symbol, dt in self.strategy.blacklist.items()
+        }
+        
         state_data = {
-            'strategy_name': 'StrategyV6',
+            'strategy_name': f'Strategy{self.strategy_name.upper()}',
             'daily_trade_count': self.strategy.daily_trade_count,
             'daily_position_ratio': 0.0,  # 已废弃，保留字段兼容性
-            'blacklist': self.strategy.blacklist
+            'blacklist': blacklist_serializable
         }
         self.db.save_strategy_state(today, state_data)
     
@@ -266,7 +340,14 @@ class TradingSystem:
                 new_options = self.option_monitor.monitor_one_round()
                 
                 if new_options:
-                    self.logger.info(f"发现新信号: {len(new_options)} 条")
+                    # 汇总新信号的股票代码
+                    symbols = [opt.symbol for opt in new_options]
+                    unique_symbols = sorted(set(symbols))
+                    
+                    self.logger.info(
+                        f"收到新信号: {len(new_options)}条 "
+                        f"涉及股票: {', '.join(unique_symbols)}"
+                    )
                     
                     # 2. 处理每条新数据，判断是否买入
                     for option_data in new_options:
@@ -295,31 +376,34 @@ class TradingSystem:
             option_data: 期权交易数据（OptionData 对象）
         """
         try:
-            # 生成信号ID
-            signal_id = f"{option_data.symbol}_{option_data.time.strftime('%Y%m%d%H%M%S')}_{option_data.side}"
+            self.logger.info(f"[_process_signal] 开始处理信号: symbol={option_data.symbol}, premium=${option_data.premium:,.0f}, time={option_data.time}")
             
-            # 保存信号到数据库
+            # 标准化股票代码（美股市场）
+            standardized_symbol = normalize_symbol(option_data.symbol, market='US')
+            
+            # 生成信号ID（使用标准化的symbol）
+            signal_id = f"{standardized_symbol}_{option_data.time.strftime('%Y%m%d%H%M%S')}_{option_data.side}"
+            
+            # 保存信号到数据库（使用标准化的symbol）
             signal_data = {
                 'signal_id': signal_id,
-                'symbol': option_data.symbol,
+                'symbol': standardized_symbol,  # 使用标准化的symbol
                 'option_type': option_data.option_type,
                 'contract': option_data.contract,
                 'side': option_data.side,
                 'premium': option_data.premium,
+                'stock_price': option_data.stock_price,  # 保存期权数据中的股票价格
                 'signal_time': option_data.time.isoformat(),
                 'processed': False,
-                'meta': {
-                    'ask': option_data.ask,
-                    'strike': option_data.strike,
-                }
+                'meta': option_data.metadata if option_data.metadata else {}  # 保存 metadata（包含历史数据）
             }
             self.db.save_signal(signal_data)
             
             # 转换为 SignalEvent
             signal = self._convert_to_signal(option_data)
             
-            # 调用策略判断
-            decision = self.strategy.on_signal(signal, self.market_client)
+            # 调用策略判断（返回决策和过滤原因）
+            decision, filter_reason = self.strategy.on_signal(signal, self.market_client)
             
             if decision:
                 self.logger.info(
@@ -337,12 +421,14 @@ class TradingSystem:
                     order_id=decision.client_id
                 )
             else:
-                self.logger.debug(f"信号被过滤: {option_data.symbol}")
-                # 更新信号状态：未通过过滤
+                # 使用策略返回的详细过滤原因
+                filter_reason = filter_reason or "策略过滤(未知原因)"
+                self.logger.info(f"信号被过滤: {option_data.symbol} - {filter_reason}")
+                # 更新信号状态：未通过过滤，并记录详细原因
                 self.db.update_signal_processed(
                     signal_id, 
                     generated_order=False,
-                    filter_reason="策略过滤"
+                    filter_reason=filter_reason
                 )
                 
         except Exception as e:
@@ -358,15 +444,20 @@ class TradingSystem:
         Returns:
             SignalEvent
         """
+        # 标准化股票代码（美股市场）
+        standardized_symbol = normalize_symbol(option_data.symbol, market='US')
+        
         return SignalEvent(
-            event_id=f"{option_data.symbol}_{option_data.time.strftime('%Y%m%d%H%M%S')}",
-            symbol=option_data.symbol,
+            event_id=f"{standardized_symbol}_{option_data.time.strftime('%Y%m%d%H%M%S')}",
+            symbol=standardized_symbol,  # 使用标准化的symbol
             premium_usd=option_data.premium,
-            ask=option_data.ask,
+            ask=None,  # ask 字段已从 OptionData 中移除
             chain_id=option_data.contract,
             event_time_cn=option_data.time,  # 已经是北京时间转换后的ET时间
             event_time_et=option_data.time if hasattr(option_data.time, 'tzinfo') else 
-                         option_data.time.replace(tzinfo=ZoneInfo('America/New_York'))
+                         option_data.time.replace(tzinfo=ZoneInfo('America/New_York')),
+            stock_price=option_data.stock_price,  # 传递期权数据中的股票价格
+            metadata=option_data.metadata  # 传递元数据（包含历史期权数据）
         )
     
     def _execute_buy(self, decision, signal_id=None):
@@ -378,54 +469,70 @@ class TradingSystem:
             signal_id: 关联的信号ID（可选）
         """
         try:
+            self.logger.info(f"[_execute_buy] 开始执行买入: symbol={decision.symbol}, shares={decision.shares}, price=${decision.price_limit:.2f}, client_id={decision.client_id}")
+            
+            # 标准化股票代码（确保包含市场前缀，如 US.AAPL）
+            standardized_symbol = normalize_symbol(decision.symbol, market='US')
+            self.logger.debug(f"[_execute_buy] 标准化符号: {decision.symbol} → {standardized_symbol}")
+            
+            # 使用市价单提高成交率
+            self.logger.debug(f"[_execute_buy] 调用 market_client.buy_stock(): symbol={decision.symbol}, qty={decision.shares}")
             order_id = self.market_client.buy_stock(
-                symbol=decision.symbol,
+                symbol=decision.symbol,  # Futu API内部也会标准化，这里保持兼容
                 quantity=decision.shares,
-                price=decision.price_limit,
-                order_type='LIMIT'
+                price=None,  # 市价单不需要指定价格
+                order_type='MARKET'
             )
+            self.logger.debug(f"[_execute_buy] buy_stock 返回: order_id={order_id} (type: {type(order_id)})")
             
             if order_id:
-                self.logger.info(f"买入订单已提交: {decision.symbol} [ID: {order_id}]")
+                self.logger.info(f"买入订单已提交: {standardized_symbol} [ID: {order_id}]")
                 
                 # 获取订单时间
                 order_time_str = decision.t_exec_et.isoformat() if hasattr(decision, 't_exec_et') else datetime.now(ZoneInfo('America/New_York')).isoformat()
                 order_time_dt = datetime.fromisoformat(order_time_str)
                 
-                # 立即将股票加入黑名单（避免当日重复交易）
+                # 立即将股票加入黑名单（使用标准化的symbol）
                 if order_time_dt.tzinfo is None:
                     order_time_dt = order_time_dt.replace(tzinfo=ZoneInfo('America/New_York'))
-                self.strategy.blacklist[decision.symbol] = order_time_dt
-                self.logger.debug(f"黑名单更新: {decision.symbol} 加入黑名单，买入时间: {order_time_dt}")
+                self.strategy.blacklist[standardized_symbol] = order_time_dt
+                self.logger.debug(f"黑名单更新: {standardized_symbol} 加入黑名单，买入时间: {order_time_dt}")
                 
-                # 保存订单记录
+                # 保存订单记录（使用标准化的symbol）
                 order_data = {
                     'order_id': decision.client_id,
-                    'symbol': decision.symbol,
+                    'symbol': standardized_symbol,  # 使用标准化的symbol
                     'order_type': 'BUY',
                     'order_time': order_time_str,
                     'shares': decision.shares,
-                    'price': decision.price_limit,
+                    'price': decision.price_limit,  # 估算价格，实际成交价由市价单确定
                     'status': 'PENDING',
                     'signal_id': signal_id,
                     'pos_ratio': decision.pos_ratio,
                     'meta': decision.meta if hasattr(decision, 'meta') else {}
                 }
+                self.logger.debug(f"[_execute_buy] 保存订单到数据库: {order_data}")
                 self.db.save_order(order_data)
+                self.logger.info(f"[_execute_buy] 订单已保存: client_id={decision.client_id}")
                 
-                # 保存持仓记录
+                # 保存持仓记录（使用标准化的symbol）
                 position_data = {
-                    'symbol': decision.symbol,
+                    'symbol': standardized_symbol,  # 使用标准化的symbol
                     'shares': decision.shares,
                     'entry_time': order_data['order_time'],
-                    'entry_price': decision.price_limit,
+                    'entry_price': decision.price_limit,  # 估算价格，待成交后更新
                     'entry_order_id': decision.client_id,
                     'signal_id': signal_id,
                     'target_profit_price': decision.price_limit * (1 + self.strategy.take_profit),
                     'stop_loss_price': decision.price_limit * (1 - self.strategy.stop_loss),
+                    'highest_price': decision.price_limit,  # 初始最高价 = 买入价
                     'status': 'OPEN'
                 }
                 self.db.save_position(position_data)
+                
+                # 初始化最高价（从买入价开始）
+                self.position_highest_prices[standardized_symbol] = decision.price_limit
+                self.logger.info(f"记录 {standardized_symbol} 买入价（初始最高价）: ${decision.price_limit:.2f}")
                 
                 # 更新日交易计数
                 self.strategy.daily_trade_count += 1
@@ -438,7 +545,7 @@ class TradingSystem:
                 self.logger.error(f"买入订单提交失败: {decision.symbol}")
                 
         except Exception as e:
-            self.logger.error(f"执行买入失败: {e}", exc_info=True)
+            self.logger.error(f"[_execute_buy] 执行买入异常: {type(e).__name__}: {str(e)}", exc_info=True)
     
     def _check_positions(self):
         """
@@ -459,18 +566,28 @@ class TradingSystem:
             except Exception as e:
                 self.logger.warning(f"查询未成交订单失败: {e}")
             
-            # 从数据库获取持仓的开仓时间信息
+            # 从数据库获取持仓的开仓时间信息和最高价
             db_positions = self.db.get_all_open_positions()
             entry_time_map = {
                 pos['symbol']: pos['entry_time'] 
                 for pos in db_positions
             }
             
+            # 创建最高价映射（从数据库）
+            highest_price_map = {
+                pos['symbol']: pos.get('highest_price', pos.get('entry_price', 0))
+                for pos in db_positions
+            }
+            
             # 调用策略检查持仓
             exit_decisions = self.strategy.on_position_check(
                 self.market_client, 
-                entry_time_map=entry_time_map
+                entry_time_map=entry_time_map,
+                highest_price_map=highest_price_map
             )
+            
+            # 更新所有持仓的最高价到数据库
+            self._update_positions_highest_price(self.market_client, db_positions)
             
             if exit_decisions:
                 for decision in exit_decisions:
@@ -493,26 +610,30 @@ class TradingSystem:
             decision: ExitDecision 对象
         """
         try:
+            # 标准化股票代码（确保包含市场前缀）
+            standardized_symbol = normalize_symbol(decision.symbol, market='US')
+            
+            # 使用市价单提高成交率（与买入保持一致）
             order_id = self.market_client.sell_stock(
-                symbol=decision.symbol,
+                symbol=decision.symbol,  # Futu API内部也会标准化
                 quantity=decision.shares,
-                price=decision.price_limit,
-                order_type='LIMIT'
+                price=None,  # 市价单不需要指定价格
+                order_type='MARKET'
             )
             
             if order_id:
-                # 1. 获取买入订单信息（计算盈亏）
-                buy_orders = self.db.get_orders_by_symbol(decision.symbol, 'BUY')
+                # 1. 获取买入订单信息（计算盈亏）- 使用标准化symbol查询
+                buy_orders = self.db.get_orders_by_symbol(standardized_symbol, 'BUY')
                 entry_order = buy_orders[0] if buy_orders else None
                 
-                # 2. 保存卖出订单
+                # 2. 保存卖出订单（使用标准化symbol）
                 order_data = {
                     'order_id': decision.client_id,
-                    'symbol': decision.symbol,
+                    'symbol': standardized_symbol,  # 使用标准化的symbol
                     'order_type': 'SELL',
                     'order_time': decision.t_exec_et.isoformat() if hasattr(decision, 't_exec_et') else datetime.now(ZoneInfo('America/New_York')).isoformat(),
                     'shares': decision.shares,
-                    'price': decision.price_limit,
+                    'price': decision.price_limit,  # 估算价格（市场当前价），实际成交价由市价单确定
                     'status': 'PENDING',
                     'related_order_id': entry_order['order_id'] if entry_order else None,
                     'reason': decision.reason,
@@ -520,21 +641,21 @@ class TradingSystem:
                 }
                 self.db.save_order(order_data)
                 
-                # 3. 计算并保存盈亏
+                # 3. 计算并保存预估盈亏（基于当前市场价格）
                 if entry_order:
                     pnl_amount = (decision.price_limit - entry_order['price']) * decision.shares
                     pnl_ratio = (decision.price_limit - entry_order['price']) / entry_order['price']
                     self.db.update_order_pnl(decision.client_id, pnl_amount, pnl_ratio)
                     
                     self.logger.info(
-                        f"卖出订单已提交: {decision.symbol} [ID: {order_id}] "
+                        f"卖出订单已提交: {standardized_symbol} [ID: {order_id}] "
                         f"盈亏=${pnl_amount:+.2f} ({pnl_ratio:+.1%})"
                     )
                 else:
-                    self.logger.info(f"卖出订单已提交: {decision.symbol} [ID: {order_id}]")
+                    self.logger.info(f"卖出订单已提交: {standardized_symbol} [ID: {order_id}]")
                 
-                # 4. 更新持仓状态
-                self.db.close_position(decision.symbol)
+                # 4. 更新持仓状态 - 使用标准化symbol
+                self.db.close_position(standardized_symbol)
                 
             else:
                 self.logger.error(f"卖出订单提交失败: {decision.symbol}")
@@ -542,6 +663,27 @@ class TradingSystem:
         except Exception as e:
             self.logger.error(f"执行卖出失败: {e}", exc_info=True)
         
+    def _update_positions_highest_price(self, market_client: FutuClient, db_positions: list):
+        """
+        更新数据库中所有持仓的最高价。
+        
+        Args:
+            market_client: 市场数据客户端
+            db_positions: 从数据库获取的持仓列表
+        """
+        for pos in db_positions:
+            symbol = pos['symbol']
+            try:
+                # 获取当前市场价格
+                price_info = market_client.get_stock_price(symbol)
+                if price_info and price_info.get('last_price', 0) > 0:
+                    current_price = price_info['last_price']
+                    self.db.update_position_highest_price(symbol, current_price)
+                else:
+                    self.logger.debug(f"无法获取 {symbol} 有效价格，跳过更新最高价")
+            except Exception as e:
+                self.logger.warning(f"获取 {symbol} 价格失败: {e}")
+
 
 if __name__ == "__main__":
     import argparse

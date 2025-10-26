@@ -10,6 +10,28 @@ from datetime import datetime
 from typing import Optional, List, Dict
 from zoneinfo import ZoneInfo
 
+# 导入 OptionData
+try:
+    from .parser import OptionData
+except ImportError:
+    try:
+        from parser import OptionData
+    except ImportError:
+        # 定义简化的 OptionData 以避免循环导入
+        from dataclasses import dataclass, field
+        
+        @dataclass(frozen=True)
+        class OptionData:
+            """期权交易数据（不可变）"""
+            time: datetime
+            symbol: str
+            side: str
+            option_type: str
+            contract: str
+            stock_price: float
+            premium: float
+            metadata: dict = field(default_factory=dict, hash=False, compare=False)
+
 def parse_et_time(time_str: str) -> datetime:
     """
     解析包含 EDT/EST 时区的时间字符串
@@ -160,15 +182,27 @@ def parse_unusualwhales_page(file_path: str, convert_timezone: bool = True) -> p
             try:
                 time_str = line
                 
-                # 下一行应该是股票代码
-                if i + 1 >= len(lines):
-                    break
-                ticker = lines[i + 1].strip()
+                # 下一行应该是股票代码，但可能前面有空行
+                offset = 1
+                ticker = ''
                 
-                # 再下一行是主数据行
-                if i + 2 >= len(lines):
-                    break
-                data_line = lines[i + 2].strip()
+                # 跳过空行，查找股票代码
+                while i + offset < len(lines) and offset <= 3:
+                    next_line = lines[i + offset].strip()
+                    if next_line and not next_line.startswith('Time'):
+                        ticker = next_line
+                        break
+                    offset += 1
+                
+                if not ticker:
+                    i += 1
+                    continue
+                
+                # 找到数据行（在股票代码之后）
+                data_line = ''
+                data_offset = offset + 1
+                if i + data_offset < len(lines):
+                    data_line = lines[i + data_offset].strip()
                 
                 # 解析主数据行
                 parts = data_line.split('\t')
@@ -194,20 +228,21 @@ def parse_unusualwhales_page(file_path: str, convert_timezone: bool = True) -> p
                 # 解析 bid-ask 范围
                 bid, ask = _parse_bid_ask(bid_ask)
                 
-                # 后续行包含额外信息
+                # 后续行包含额外信息（基于data_offset计算）
                 chain_pct = ''
                 legs = ''
                 code = ''
                 flags = ''
                 
-                if i + 3 < len(lines):
-                    chain_pct = lines[i + 3].strip()
-                if i + 4 < len(lines):
-                    legs = lines[i + 4].strip()
-                if i + 5 < len(lines):
-                    code = lines[i + 5].strip()
-                if i + 6 < len(lines):
-                    flags = lines[i + 6].strip()
+                base_idx = i + data_offset
+                if base_idx + 1 < len(lines):
+                    chain_pct = lines[base_idx + 1].strip()
+                if base_idx + 2 < len(lines):
+                    legs = lines[base_idx + 2].strip()
+                if base_idx + 3 < len(lines):
+                    code = lines[base_idx + 3].strip()
+                if base_idx + 4 < len(lines):
+                    flags = lines[base_idx + 4].strip()
                 
                 # 时区转换
                 if convert_timezone:
@@ -245,8 +280,8 @@ def parse_unusualwhales_page(file_path: str, convert_timezone: bool = True) -> p
                 
                 records.append(record)
                 
-                # 跳过已处理的行
-                i += 7  # 时间 + 代码 + 数据行 + 4行额外信息
+                # 跳过已处理的行（动态计算）
+                i += data_offset + 5  # 时间 + offset(找到ticker) + 数据行 + 4行额外信息
                 
             except Exception as e:
                 # 解析出错，跳过这条记录
@@ -327,14 +362,179 @@ def _parse_percentage(value: str) -> Optional[float]:
         return None
 
 
+def parse_unusualwhales_to_dataframe(file_path: str, convert_timezone: bool = True) -> pd.DataFrame:
+    """
+    解析 UnusualWhales 期权流数据文件并返回 pandas DataFrame
+    
+    这是一个便捷函数，内部调用 parse_unusualwhales_page 并将结果转换为 DataFrame。
+    不会影响原有系统的运行。
+    
+    Args:
+        file_path: 文件路径
+        convert_timezone: 是否将时间从北京时间转换为美东时间，默认 True
+        
+    Returns:
+        pd.DataFrame: 包含期权交易数据的DataFrame，列包括：
+            - time: 交易时间（美东时间）
+            - ticker: 股票代码
+            - side: 方向 (ASK/BID)
+            - strike: 行权价
+            - option_type: 期权类型 (call/put)
+            - contract: 到期日
+            - stock_price: 股票价格
+            - bid: 买价
+            - ask: 卖价
+            - spot: 成交价
+            - size: 数量
+            - premium: 权利金
+            - volume: 成交量
+            - open_interest: 持仓量
+            - chain_bid_ask_pct: 链上买卖比例
+            - legs: 腿数
+            - code: 交易代码
+            - flags: 标记/标签
+            - time_beijing: 原始北京时间（仅当 convert_timezone=True）
+    
+    Example:
+        >>> df = parse_unusualwhales_to_dataframe('page_20251007_211426.txt')
+        >>> print(df.shape)
+        (26, 19)
+        >>> print(df['ticker'].unique())
+        ['APP' 'SPOT' 'NFLX' ...]
+    """
+    # 调用原函数获取记录列表
+    records = parse_unusualwhales_page(file_path, convert_timezone)
+    
+    # 转换为 DataFrame
+    df = pd.DataFrame(records)
+    
+    return df
+
+
+def parse_option_csv(file_path: str) -> Dict:
+    """
+    解析 CSV 格式的期权信号文件
+    
+    CSV 格式：
+    - 第1行：新增期权信号（主数据）
+    - 第2+行：历史期权数据（作为元数据）
+    - 时间列为北京时间，需要转换为美东时间
+    
+    Args:
+        file_path: CSV 文件路径
+        
+    Returns:
+        Dict: 包含以下结构的字典
+        {
+            'primary': OptionData,          # 第一行的主信号
+            'historical': [dict, ...],      # 历史数据列表
+        }
+    """
+    try:
+        df = pd.read_csv(file_path)
+        
+        if df.empty or len(df) == 0:
+            return None
+        
+        # 获取参考日期
+        reference_date = _extract_date_from_filename(file_path)
+        if reference_date is None:
+            reference_date = datetime.now()
+        
+        records = []
+        
+        # 处理每一行
+        for idx, row in df.iterrows():
+            try:
+                # 获取时间（北京时间，格式为 MM/DD HH:MM:SS）
+                time_beijing_str = str(row['Time']).strip() if 'Time' in row and pd.notna(row['Time']) else ''
+                
+                if not time_beijing_str:
+                    continue
+                
+                # 转换北京时间为美东时间
+                time_et_str = _convert_beijing_to_et(time_beijing_str, reference_date)
+                
+                # 解析美东时间
+                time_et = datetime.strptime(
+                    time_et_str.rsplit(' ', 1)[0],  # 移除时区标识
+                    '%Y-%m-%d %H:%M:%S'
+                )
+                time_et = time_et.replace(tzinfo=ZoneInfo('America/New_York'))
+                
+                # 提取数据（使用 .get() 提供默认值）
+                ticker = str(row.get('Ticker', row.get('ticker', ''))).strip() if 'Ticker' in row else ''
+                side = str(row.get('Side', row.get('side', ''))).upper().strip() if 'Side' in row else ''
+                
+                # 提取数据
+                record = {
+                    'time': time_et,
+                    'time_beijing': time_beijing_str,
+                    'symbol': ticker,
+                    'side': side,
+                    'option_type': str(row.get('Option Type', row.get('option_type', ''))).lower().strip() if 'Option Type' in row else '',
+                    'contract': str(row.get('Contract', row.get('contract', ''))).strip() if 'Contract' in row else '',
+                    'stock_price': float(row['Stock']) if 'Stock' in row and pd.notna(row['Stock']) else 0.0,
+                    'premium': float(row['Premium']) if 'Premium' in row and pd.notna(row['Premium']) else 0.0,
+                    'bid': float(row['Bid']) if 'Bid' in row and pd.notna(row['Bid']) else 0.0,
+                    'ask': float(row['Ask']) if 'Ask' in row and pd.notna(row['Ask']) else 0.0,
+                }
+                records.append(record)
+            except Exception as e:
+                continue
+        
+        if not records:
+            return None
+        
+        # 第一行是主数据
+        primary_record = records[0]
+        
+        # 将主记录转换为 OptionData
+        primary_data = OptionData(
+            time=primary_record['time'],
+            symbol=f"US.{primary_record['symbol']}",
+            side=primary_record['side'],
+            option_type=primary_record['option_type'],
+            contract=primary_record['contract'],
+            stock_price=primary_record['stock_price'],
+            premium=primary_record['premium'],
+            metadata={
+                'history_option_data': [
+                    {
+                        'time': rec['time'].isoformat(),
+                        'symbol': f"US.{rec['symbol']}",
+                        'side': rec['side'],
+                        'option_type': rec['option_type'],
+                        'contract': rec['contract'],
+                        'stock_price': rec['stock_price'],
+                        'premium': rec['premium']
+                    }
+                    for rec in records[1:]  # 第2行及之后为历史数据
+                ],
+                'total_records': len(records),
+                'source_file': file_path
+            }
+        )
+        
+        return {
+            'primary': primary_data,
+            'historical': records[1:] if len(records) > 1 else []
+        }
+    
+    except Exception as e:
+        return None
 
 
 
 # 示例用法
 if __name__ == '__main__':
-    # 测试解析
+    # 测试解析（返回 DataFrame）
     test_file = '/Users/niningxi/Desktop/future/demo/page_20251007_211426.txt'
-    df = parse_unusualwhales_page(test_file)
-    df.to_csv('./test.csv')    
+    
+    # 使用新函数获取 DataFrame
+    df = parse_unusualwhales_to_dataframe(test_file)
+    print(f"解析成功: {df.shape}")
+    print(df.head())
+    df.to_csv('./test.csv', index=False)    
 
 

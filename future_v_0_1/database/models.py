@@ -111,6 +111,7 @@ class DatabaseManager:
                     market_value REAL,                        -- 市值
                     unrealized_pnl REAL,                      -- 未实现盈亏
                     unrealized_pnl_ratio REAL,                -- 未实现盈亏比例
+                    highest_price REAL,                       -- 持仓以来最高价
                     
                     -- 策略信息
                     signal_id TEXT,                           -- 关联信号ID
@@ -176,6 +177,7 @@ class DatabaseManager:
                     contract TEXT NOT NULL,                   -- 合约代码
                     side TEXT NOT NULL,                       -- BUY/SELL
                     premium REAL NOT NULL,                    -- 权利金
+                    stock_price REAL,                         -- 股票价格（期权数据中的）
                     signal_time TEXT NOT NULL,                -- 信号时间
                     
                     -- 处理状态
@@ -437,9 +439,9 @@ class DatabaseManager:
                 INSERT OR REPLACE INTO positions (
                     symbol, shares, entry_time, entry_price, entry_order_id,
                     current_price, market_value, unrealized_pnl, unrealized_pnl_ratio,
-                    signal_id, target_profit_price, stop_loss_price, target_exit_date,
+                    highest_price, signal_id, target_profit_price, stop_loss_price, target_exit_date,
                     status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 position_data['symbol'],
                 position_data['shares'],
@@ -450,6 +452,7 @@ class DatabaseManager:
                 position_data.get('market_value'),
                 position_data.get('unrealized_pnl'),
                 position_data.get('unrealized_pnl_ratio'),
+                position_data.get('highest_price'),
                 position_data.get('signal_id'),
                 position_data.get('target_profit_price'),
                 position_data.get('stop_loss_price'),
@@ -489,6 +492,33 @@ class DatabaseManager:
             'status': 'CLOSED',
             'closed_at': datetime.now(ZoneInfo('America/New_York')).isoformat()
         })
+    
+    def update_position_highest_price(self, symbol: str, current_price: float):
+        """
+        更新持仓的最高价
+        
+        Args:
+            symbol: 股票代码
+            current_price: 当前实时价格
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # 获取现有最高价
+            cursor.execute('SELECT highest_price FROM positions WHERE symbol = ? AND status = "OPEN"', (symbol,))
+            row = cursor.fetchone()
+            
+            if row:
+                existing_highest = row['highest_price'] if row['highest_price'] else 0
+                new_highest = max(existing_highest, current_price)
+                
+                # 只在最高价有变化时更新
+                if new_highest > existing_highest:
+                    cursor.execute(
+                        'UPDATE positions SET highest_price = ?, updated_at = ? WHERE symbol = ?',
+                        (new_highest, datetime.now(ZoneInfo('America/New_York')).isoformat(), symbol)
+                    )
+                    self.logger.debug(f"更新 {symbol} 最高价: ${new_highest:.2f}")
     
     def get_position(self, symbol: str) -> Optional[Dict]:
         """查询持仓"""
@@ -626,9 +656,9 @@ class DatabaseManager:
             
             cursor.execute('''
                 INSERT OR IGNORE INTO option_signals (
-                    signal_id, symbol, option_type, contract, side, premium, signal_time,
+                    signal_id, symbol, option_type, contract, side, premium, stock_price, signal_time,
                     processed, generated_order, order_id, filter_reason, meta, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 signal_data['signal_id'],
                 signal_data['symbol'],
@@ -636,6 +666,7 @@ class DatabaseManager:
                 signal_data['contract'],
                 signal_data['side'],
                 signal_data['premium'],
+                signal_data.get('stock_price'),  # 添加股票价格
                 signal_data['signal_time'],
                 signal_data.get('processed', False),
                 signal_data.get('generated_order', False),
@@ -884,6 +915,207 @@ class DatabaseManager:
             summary['auto_fix_count'] = cursor.fetchone()[0]
             
             return summary
+    
+    # ============ 期权信号管理 ============
+    
+    def save_option_signal(
+        self,
+        signal_id: str,
+        symbol: str,
+        option_type: str,
+        contract: str,
+        side: str,
+        premium: float,
+        stock_price: Optional[float],
+        signal_time: str,
+        meta: Optional[Dict] = None
+    ):
+        """
+        保存期权信号
+        
+        Args:
+            signal_id: 信号ID（唯一）
+            symbol: 股票代码
+            option_type: 期权类型 (CALL/PUT)
+            contract: 合约代码
+            side: 方向 (BUY/SELL)
+            premium: 权利金
+            stock_price: 股票价格（期权数据中的）
+            signal_time: 信号时间（ISO格式）
+            meta: 元数据（可选）
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            now = datetime.now(ZoneInfo('America/New_York')).isoformat()
+            meta_json = json.dumps(meta) if meta else None
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO option_signals (
+                    signal_id, symbol, option_type, contract, side,
+                    premium, stock_price, signal_time, meta, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                signal_id, symbol, option_type, contract, side,
+                premium, stock_price, signal_time, meta_json, now
+            ))
+            
+            self.logger.debug(
+                f"保存期权信号: {symbol} {option_type} "
+                f"权利金${premium:,.0f} 股价${stock_price:.2f if stock_price else 0}"
+            )
+    
+    def update_option_signal_status(
+        self,
+        signal_id: str,
+        processed: bool = True,
+        generated_order: bool = False,
+        order_id: Optional[str] = None,
+        filter_reason: Optional[str] = None
+    ):
+        """
+        更新期权信号处理状态
+        
+        Args:
+            signal_id: 信号ID
+            processed: 是否已处理
+            generated_order: 是否生成订单
+            order_id: 关联订单ID（可选）
+            filter_reason: 过滤原因（可选）
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE option_signals
+                SET processed = ?,
+                    generated_order = ?,
+                    order_id = ?,
+                    filter_reason = ?
+                WHERE signal_id = ?
+            ''', (
+                1 if processed else 0,
+                1 if generated_order else 0,
+                order_id,
+                filter_reason,
+                signal_id
+            ))
+    
+    def get_option_signals(
+        self,
+        symbol: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        processed: Optional[bool] = None,
+        limit: int = 100
+    ) -> List[Dict]:
+        """
+        查询期权信号
+        
+        Args:
+            symbol: 股票代码（可选）
+            start_date: 开始日期（可选）
+            end_date: 结束日期（可选）
+            processed: 处理状态过滤（可选）
+            limit: 返回数量限制
+            
+        Returns:
+            List[Dict]: 期权信号列表
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            query = 'SELECT * FROM option_signals WHERE 1=1'
+            params = []
+            
+            if symbol:
+                query += ' AND symbol = ?'
+                params.append(symbol)
+            
+            if start_date:
+                query += ' AND signal_time >= ?'
+                params.append(start_date)
+            
+            if end_date:
+                query += ' AND signal_time <= ?'
+                params.append(end_date)
+            
+            if processed is not None:
+                query += ' AND processed = ?'
+                params.append(1 if processed else 0)
+            
+            query += ' ORDER BY signal_time DESC LIMIT ?'
+            params.append(limit)
+            
+            cursor.execute(query, params)
+            
+            signals = []
+            for row in cursor.fetchall():
+                signal = dict(row)
+                # 解析 meta JSON
+                if signal.get('meta'):
+                    try:
+                        signal['meta'] = json.loads(signal['meta'])
+                    except:
+                        pass
+                signals.append(signal)
+            
+            return signals
+    
+    def get_option_signal_stats(self, days: int = 7) -> Dict:
+        """
+        获取期权信号统计
+        
+        Args:
+            days: 统计最近多少天
+            
+        Returns:
+            Dict: 统计结果
+        """
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            
+            et_now = datetime.now(ZoneInfo('America/New_York'))
+            start_time = (et_now - timedelta(days=days)).isoformat()
+            
+            stats = {}
+            
+            # 总信号数
+            cursor.execute('''
+                SELECT COUNT(*) FROM option_signals
+                WHERE signal_time >= ?
+            ''', (start_time,))
+            stats['total_signals'] = cursor.fetchone()[0]
+            
+            # 已处理信号数
+            cursor.execute('''
+                SELECT COUNT(*) FROM option_signals
+                WHERE signal_time >= ? AND processed = 1
+            ''', (start_time,))
+            stats['processed_signals'] = cursor.fetchone()[0]
+            
+            # 生成订单数
+            cursor.execute('''
+                SELECT COUNT(*) FROM option_signals
+                WHERE signal_time >= ? AND generated_order = 1
+            ''', (start_time,))
+            stats['orders_generated'] = cursor.fetchone()[0]
+            
+            # 按股票统计
+            cursor.execute('''
+                SELECT symbol, COUNT(*) as count
+                FROM option_signals
+                WHERE signal_time >= ?
+                GROUP BY symbol
+                ORDER BY count DESC
+                LIMIT 10
+            ''', (start_time,))
+            stats['top_symbols'] = [
+                {'symbol': row[0], 'count': row[1]}
+                for row in cursor.fetchall()
+            ]
+            
+            return stats
     
     # ============ 备份和维护 ============
     

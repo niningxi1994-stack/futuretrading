@@ -303,6 +303,8 @@ class FutuClient:
                 return []
             
             positions = []
+            cleared_positions = []  # 记录已清空的持仓
+            
             for _, row in data.iterrows():
                 pos = {
                     'symbol': row['code'],
@@ -316,9 +318,58 @@ class FutuClient:
                     'today_buy_qty': safe_int(row.get('today_buy_qty', 0)),
                     'today_sell_qty': safe_int(row.get('today_sell_qty', 0))
                 }
+                
+                # 过滤已清空的持仓（份额和市值都为0）
+                if pos['position'] == 0 and pos['market_value'] == 0:
+                    cleared_positions.append(pos['symbol'])
+                    continue
+                
                 positions.append(pos)
             
-            self.logger.info(f"✓ 查询到 {len(positions)} 个持仓")
+            # 输出持仓日志
+            if positions:
+                self.logger.info(f"✓ 查询到 {len(positions)} 个持仓")
+                for pos in positions:
+                    # 获取实时价格用于日志显示
+                    display_price = pos['market_price']
+                    try:
+                        price_info = self.get_stock_price(pos['symbol'])
+                        if price_info and price_info.get('last_price', 0) > 0:
+                            display_price = price_info['last_price']
+                    except Exception:
+                        # 如果获取实时价格失败，使用缓存价格
+                        pass
+                    
+                    # 手动计算盈亏率（Futu返回的pl_ratio不准确）
+                    # 使用实时价格重新计算市值和盈亏
+                    market_value = pos['position'] * display_price
+                    cost_total = pos['position'] * pos['cost_price']
+                    if cost_total > 0:
+                        pnl_ratio = (market_value - cost_total) / cost_total * 100
+                    else:
+                        pnl_ratio = 0
+                    
+                    pnl_amount = market_value - cost_total
+                    
+                    # 计算动态止损信息（如果配置了）
+                    highest_price = pos.get('highest_price', display_price)
+                    dynamic_sl_info = ""
+                    if highest_price and highest_price > 0:
+                        drawdown_ratio = (highest_price - display_price) / highest_price
+                        dynamic_sl_info = f", 最高${highest_price:.2f}, 回撤{drawdown_ratio:.2%}"
+                    
+                    self.logger.info(
+                        f"  - {pos['symbol']}: {pos['position']}股 @${pos['cost_price']:.2f} "
+                        f"(当前${display_price:.2f}, 市值${market_value:,.2f}, "
+                        f"盈亏${pnl_amount:+,.2f} {pnl_ratio:+.2f}%{dynamic_sl_info})"
+                    )
+            else:
+                self.logger.info("当前无有效持仓")
+            
+            # 如果有已清空的持仓，用DEBUG级别记录
+            if cleared_positions:
+                self.logger.debug(f"已清空持仓（忽略）: {', '.join(cleared_positions)}")
+            
             return positions
             
         except Exception as e:
@@ -601,7 +652,8 @@ class FutuClient:
                 
                 # 解析买卖方向
                 trd_side = row['trd_side']
-                side = 'BUY' if trd_side == 1 else 'SELL'
+                # Futu API 返回的是字符串 'BUY' 或 'SELL'，不是数字
+                side = str(trd_side)
                 
                 # 解析订单状态
                 status_name = 'UNKNOWN'
