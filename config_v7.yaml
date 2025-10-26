@@ -1,0 +1,91 @@
+# Future V0.1 交易系统配置文件 - V7策略配置
+
+# 期权监控器配置
+option_monitor:
+  # 监控目录（存放待解析的期权数据文件）
+  watch_dir: '/Users/niningxi/Documents/WebText/'
+  
+  # 持久化目录（存放处理记录和解析结果）
+  persistant_dir: '/Users/niningxi/Desktop/future/op_trade_data'
+
+# 系统配置
+system:
+  # 检查间隔（秒）
+  check_interval: 20
+  
+  # 对账配置
+  reconciliation:
+    # 对账时间（美东时间，格式：HH:MM:SS）
+    time: '17:00:00'
+    # 是否自动修复差异（以Futu数据为准）
+    auto_fix: true
+
+# 日志配置
+logging:
+  # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: 'INFO'
+  
+  # 日志文件路径
+  log_file: 'logs/trading_system_v7.log'
+
+# V7策略配置
+strategy:
+  name: 'v7'
+  
+  # ===== QQQ MA多头排列过滤（新增）=====
+  # 条件：MA20 > MA60（中期趋势向上）
+  # 使用QQQ（与策略交易品种相关性更高）
+  # 效果：过滤2025年3-4月回撤期92.9%的交易日，保留74.5%上涨期机会
+  enable_ma_filter: false  # 是否启用QQQ MA多头排列过滤
+  
+  # ===== 入场过滤条件 =====
+  filter:
+    # 交易时间窗口（美东时间）
+    trade_start_time: '9:30:00'  # 中午12:30 PM之后（ET时间）
+    
+    # Entry Delay：信号后延迟买入的分钟数
+    entry_delay: 1
+    
+    # 最小期权溢价（美元）
+    min_option_premium: 100000  # $100,000
+    
+    # 距离收盘缓冲时间（分钟）- 15:54之后的信号不交易
+    market_close_buffer: 1
+    
+    # 历史Premium过滤
+    historical_premium_multiplier: 0  # 当前溢价必须 >= 历史均值 × 2倍
+    historical_lookback_days: 7  # 回溯7天
+    # 实盘：'call_csv_files' 或实际路径
+    # 回测：'BACKTEST_DISABLE' 禁用策略内部的历史过滤（由回测引擎处理）
+    call_csv_dir: '/Users/admin/Desktop/xpqh_project/futuretrading/future_v_0_1/database/call_csv_files_clean'
+    
+    # 做空交易过滤：如果当天已做空总和 >= 当前交易premium × 倍数，则过滤该信号
+    max_daily_short_premium_multiplier: 0 # 做空premium倍数过滤（0=禁用）
+  
+  # ===== 仓位管理 =====
+  position_compute:
+    max_daily_trades: 20 # 每日最多5笔交易
+    max_daily_position: 0.99  # 每日总仓位上限99%
+    max_single_position: 0.05  # 单笔仓位上限40%
+    premium_divisor: 1000000  # 仓位计算：min(premium/800000, 0.4)
+  
+  # ===== 杠杆配置 =====
+  leverage:
+    min_cash_ratio: 0.01  # 最低现金比率1%（不允许杠杆，现金必须>0）
+    max_leverage: 0.99  # 最大持仓99%（不使用杠杆）
+  
+  # ===== 出场条件 =====
+  stop_loss: 0.1  # 固定止损-5%（初始保护）
+  take_profit: 0.3  # 止盈+50%（设置很高，让追踪止损发挥作用）
+  
+  # 追踪止损（Trailing Stop）- 动态止损
+  enable_trailing_stop: false  # 是否启用追踪止损
+  trailing_stop: 0.05  # 追踪止损-10%（从持仓期间最高价回撤10%）
+  # 说明：涨幅超过5.6%后，回撤10%会触发追踪止损，锁定利润
+  
+  holding_days: 6  # 持仓天数
+  exit_time: '15:00:00'  # 定时退出时间（第N天下午3:00 PM）
+  
+  # ===== 黑名单 =====
+  blacklist_days: 1  # 同一股票内不重复交易
+
