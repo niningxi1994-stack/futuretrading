@@ -31,10 +31,10 @@ from zoneinfo import ZoneInfo
 # ============================================================================
 
 # 回测结果文件路径（支持.json或.csv格式）
-BACKTEST_FILE = 'testall.json'
+BACKTEST_FILE = 'backtest_v8_test.json'
 
 # 输出图片文件名
-OUTPUT_IMAGE = 'equity_curve_v7_ma_filter.png'
+OUTPUT_IMAGE = 'equity_curve_v8.png'
 
 # 初始资金（如果从JSON读取则会自动使用JSON中的值）
 INITIAL_CAPITAL = 1000000

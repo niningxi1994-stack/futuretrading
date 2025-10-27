@@ -20,6 +20,10 @@ class SignalEvent:
     chain_id: Optional[str]
     event_time_cn: datetime
     event_time_et: datetime
+    strike: Optional[float] = None
+    expiry: Optional[date] = None
+    spot: Optional[float] = None  # option price from signal
+    stock_price: Optional[float] = None  # stock price from signal (CSV price column)
 
 
 @dataclass
