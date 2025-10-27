@@ -1,0 +1,63 @@
+# Future V0.1 交易系统配置文件 - V8策略配置（简化版）
+# 特点：直接买入，固定仓位，无复杂过滤
+
+# 期权监控器配置（实盘用，回测不使用）
+option_monitor:
+  watch_dir: '/Users/niningxi/Documents/WebText/'
+  persistant_dir: '/Users/niningxi/Desktop/future/op_trade_data'
+
+# 系统配置
+system:
+  check_interval: 20
+  reconciliation:
+    time: '17:00:00'
+    auto_fix: true
+
+# 日志配置
+logging:
+  level: 'INFO'
+  log_file: 'logs/trading_system_v8.log'
+
+# V8策略配置
+strategy:
+  name: 'v8'
+  
+  # ===== 入场过滤条件 =====
+  filter:
+    # 交易时间窗口（美东时间）- 可配置多个时间段
+    # 格式: [['start1', 'end1'], ['start2', 'end2']]
+    # 留空[]表示全天交易
+    trade_time_ranges:
+      - ['09:30:00', '16:00:00']  # 正常交易时段
+      # - ['09:30:00', '10:00:00']  # 只做早盘第一小时
+      # - ['14:00:00', '16:00:00']  # 只做尾盘
+    
+    # 距离收盘缓冲时间（分钟） - 15:54之后的信号不交易
+    market_close_buffer: 1
+    
+    # DTE过滤（天数）
+    dte_min: 8          # 最小DTE，过滤<=7天的短期期权
+    dte_max: 999999     # 最大DTE，设大一点不限制（或设60/90）
+    
+    # OTM率过滤（百分比）
+    otm_max: 25.0       # 最大OTM率，过滤>25%的高虚值期权
+    otm_min: 0.0        # 最小OTM率（0表示不限制）
+  
+  # ===== 仓位管理 =====
+  position_compute:
+    # V8固定仓位：每笔交易都是总资产的24%
+    fixed_position_ratio: 0.15
+    # 每日总仓位上限：99%（最多可以有4笔24%的仓位）
+    max_daily_position: 0.99
+  
+  # ===== 出场条件 =====
+  stop_loss: 0.10      # 固定止损 -10%
+  take_profit: 0.20    # 止盈 +20%
+  
+  # expiry日期的出场时间（美东时间）
+  exit_time: '10:00:00'  # 到期日早上10:00卖出
+  
+  # ===== 杠杆配置 =====
+  leverage:
+    min_cash_ratio: 0.01
+    max_leverage: 0.99

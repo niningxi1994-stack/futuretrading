@@ -88,4 +88,10 @@ secrets/
 demo/
 op_trade_data/
 check_pending_orders.py
+.specstory/
+.cursorindexingignore
 
+*.csv
+*.json
+*.txt
+*.log

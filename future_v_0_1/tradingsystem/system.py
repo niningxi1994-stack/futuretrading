@@ -14,7 +14,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.config import SystemConfig
 from optionparser.parser import OptionMonitor
-from strategy.v6 import StrategyV6
 from strategy.strategy import StrategyContext, SignalEvent
 from market.futu_client import FutuClient
 from database.models import DatabaseManager
@@ -61,13 +60,25 @@ class TradingSystem:
             db=self.db  # 传递数据库实例
         )
         
-        # 初始化策略
-        # 使用配置对象中保存的原始配置字典
-        strategy_context = StrategyContext(
-            cfg=config.raw_config,  # 使用完整配置字典
-            logger=logging.getLogger('StrategyV6')
-        )
-        self.strategy = StrategyV6(strategy_context)
+        # 初始化策略（动态选择）
+        strategy_name = config.raw_config.get('strategy', {}).get('name', 'v6')
+        
+        if strategy_name == 'v7':
+            from strategy.v7 import StrategyV7
+            strategy_context = StrategyContext(
+                cfg=config.raw_config,
+                logger=logging.getLogger('StrategyV7')
+            )
+            self.strategy = StrategyV7(strategy_context)
+        else:
+            from strategy.v6 import StrategyV6
+            strategy_context = StrategyContext(
+                cfg=config.raw_config,
+                logger=logging.getLogger('StrategyV6')
+            )
+            self.strategy = StrategyV6(strategy_context)
+        
+        self.strategy_name = strategy_name
         
         # 市场数据客户端
         self.market_client = market_client
@@ -92,7 +103,10 @@ class TradingSystem:
         # 在恢复状态后，处理历史数据（此时 processed_files 已从数据库恢复）
         self.option_monitor.parse_history_data()
         
-        self.logger.info(f"系统初始化完成 [监控: {config.option_monitor.watch_dir}, 间隔: {self.check_interval}s]")
+        self.logger.info(
+            f"系统初始化完成 [策略: {self.strategy_name}, 监控: {config.option_monitor.watch_dir}, "
+            f"间隔: {self.check_interval}s]"
+        )
     
     def _recover_state(self):
         """
@@ -170,7 +184,7 @@ class TradingSystem:
         """保存策略状态到数据库（使用美东时间）"""
         today = get_et_date().isoformat()
         state_data = {
-            'strategy_name': 'StrategyV6',
+            'strategy_name': f'Strategy{self.strategy_name.upper()}',
             'daily_trade_count': self.strategy.daily_trade_count,
             'daily_position_ratio': 0.0,  # 已废弃，保留字段兼容性
             'blacklist': self.strategy.blacklist
