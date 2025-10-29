@@ -13,8 +13,8 @@ V8 事件驱动期权流动量策略 - 简化版本（直接买入 + 固定仓�
 """
 
 import logging
-from datetime import date, datetime, time, timedelta
-from typing import Optional, Dict
+from datetime import date, datetime, time
+from typing import Dict
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -52,6 +52,10 @@ class StrategyV8(StrategyBase):
         self.otm_max = filter_cfg.get('otm_max', 100.0)
         self.otm_min = filter_cfg.get('otm_min', 0.0)
         
+        # Premium过滤
+        self.premium_max = filter_cfg.get('premium_max', 999999999)
+        self.premium_min = filter_cfg.get('premium_min', 0)
+        
         # === 仓位配置（固定20%）===
         position_cfg = strategy_cfg.get('position_compute', {})
         self.fixed_position_ratio = position_cfg.get('fixed_position_ratio', 0.20)  # 固定20%
@@ -61,6 +65,7 @@ class StrategyV8(StrategyBase):
         self.stop_loss = strategy_cfg.get('stop_loss', 0.10)  # 止损 -10%
         self.take_profit = strategy_cfg.get('take_profit', 0.20)  # 止盈 +20%
         self.exit_time = strategy_cfg.get('exit_time', '10:00:00')  # 定时退出时间（expiry日10:00）
+        self.trailing_stop_loss = strategy_cfg.get('trailing_stop_loss', 0.05) # 追踪止损 -5%
         
         # === 运行时状态 ===
         self.daily_trade_count = 0
@@ -69,9 +74,11 @@ class StrategyV8(StrategyBase):
         
         # 打印配置信息
         time_ranges_str = ', '.join([f"{r[0]}-{r[1]}" for r in self.trade_time_ranges]) if self.trade_time_ranges else '全天'
+        premium_str = f"${self.premium_min:,.0f}-${self.premium_max:,.0f}" if self.premium_max < 999999999 else f">${self.premium_min:,.0f}"
+        
         self.logger.info(
             f"StrategyV8 初始化完成:\n"
-            f"  入场: 时间={time_ranges_str}, DTE={self.dte_min}-{self.dte_max}天, OTM={self.otm_min:.1f}-{self.otm_max:.1f}%\n"
+            f"  入场: 时间={time_ranges_str}, DTE={self.dte_min}-{self.dte_max}天, OTM={self.otm_min:.1f}-{self.otm_max:.1f}%, Premium={premium_str}\n"
             f"  仓位: 固定{self.fixed_position_ratio:.0%}, 日限<={self.max_daily_position:.0%}\n"
             f"  出场: strike/expiry(10:00)/止盈{self.take_profit:+.0%}/止损{self.stop_loss:+.0%}"
         )
@@ -184,8 +191,24 @@ class StrategyV8(StrategyBase):
             elif not (hasattr(ev, 'stock_price') and ev.stock_price):
                 self.logger.warning(f"{ev.symbol} 缺少stock_price信息，无法计算OTM率")
         
+        # ===== 3.5. Premium过滤 =====
+        if hasattr(ev, 'premium_usd') and ev.premium_usd:
+            premium = ev.premium_usd
+            
+            if premium > self.premium_max:
+                self.logger.info(
+                    f"过滤[Premium过大]: {ev.symbol} Premium=${premium:,.0f} > ${self.premium_max:,.0f}"
+                )
+                return None
+            
+            if premium < self.premium_min:
+                self.logger.info(
+                    f"过滤[Premium过小]: {ev.symbol} Premium=${premium:,.0f} < ${self.premium_min:,.0f}"
+                )
+                return None
+        
         # ===== 4. 获取股票价格（用于实际买入）=====
-        market_client.set_current_time(ev.event_time_et)
+        # 注意：market_client.current_time已在主循环中设置，这里无需再设置
         
         price_info = market_client.get_stock_price(ev.symbol)
         if not price_info:
@@ -193,6 +216,13 @@ class StrategyV8(StrategyBase):
             return None
         
         current_price = price_info['last_price']
+        
+        # 调试：打印获取价格的时间（仅前10笔）
+        if not hasattr(self, '_price_debug_count'):
+            self._price_debug_count = 0
+        if self._price_debug_count < 10:
+            self.logger.info(f"[DEBUG] {ev.symbol} market_client.current_time={market_client.current_time.strftime('%Y-%m-%d %H:%M:%S')}, 价格=${current_price:.4f}")
+            self._price_debug_count += 1
         
         # ===== 5. 获取账户信息 =====
         acc_info = market_client.get_account_info()
@@ -250,6 +280,12 @@ class StrategyV8(StrategyBase):
             return None
         
         # ===== 9. 生成开仓决策 =====
+        # 注意：信号时间已在run_backtest_v8.py聚合阶段延迟10分钟
+        # 这里的event_time_et已经是延迟后的时间，无需再计算
+        signal_time = ev.event_time_et
+        exec_time = signal_time
+        
+        # ===== 10. 生成开仓决策 =====
         client_id = f"{ev.symbol}_{ev.event_time_et.strftime('%Y%m%d%H%M%S')}"
         
         # 构建详细日志
@@ -267,7 +303,8 @@ class StrategyV8(StrategyBase):
         # 准备元数据
         meta_data = {
             'event_id': ev.event_id,
-            'signal_time': ev.event_time_et.isoformat(),
+            'signal_time': signal_time.isoformat(),
+            'exec_time': exec_time.isoformat(),
         }
         if dte is not None:
             meta_data['dte'] = dte
@@ -278,7 +315,7 @@ class StrategyV8(StrategyBase):
             symbol=ev.symbol,
             shares=qty,
             price_limit=current_price,
-            t_exec_et=ev.event_time_et,
+            t_exec_et=exec_time,  # 使用延迟后的执行时间
             pos_ratio=self.fixed_position_ratio,
             client_id=client_id,
             meta=meta_data
@@ -345,19 +382,16 @@ class StrategyV8(StrategyBase):
                 self.highest_price_map[symbol] = max(self.highest_price_map[symbol], current_price)
             
             # ===== 1. 检查strike价格出场 =====
-            # 目标价 = strike + option_price (期权本身的价格)
+            # 目标价 = strike (不加option_price)
             if symbol in self.position_metadata:
                 meta = self.position_metadata[symbol]
-                if 'strike' in meta and 'option_price' in meta:
-                    strike = meta['strike']
-                    option_price = meta['option_price']
-                    target_price = strike + option_price  # strike + spot
+                if 'strike' in meta:
+                    strike_price = meta['strike']
                     
-                    if current_price >= target_price:
+                    if current_price >= strike_price:
                         self.logger.info(
-                            f"✓ 平仓决策[达到目标价]: {symbol} {can_sell_qty}股 @${current_price:.2f} "
-                            f"(成本${cost_price:.2f}, Strike=${strike:.2f}, 期权价=${option_price:.2f}, "
-                            f"目标=${target_price:.2f}, 盈亏{pnl_ratio:+.1%})"
+                            f"✓ 平仓决策[达到strike]: {symbol} {can_sell_qty}股 @${current_price:.2f} "
+                            f"(成本${cost_price:.2f}, Strike=${strike_price:.2f}, 盈亏{pnl_ratio:+.1%})"
                         )
                         exit_decisions.append(ExitDecision(
                             symbol=symbol,
@@ -365,7 +399,7 @@ class StrategyV8(StrategyBase):
                             price_limit=current_price,
                             reason='strike_price',
                             client_id=f"{symbol}_ST_{current_et.strftime('%Y%m%d%H%M%S')}",
-                            meta={'pnl_ratio': pnl_ratio, 'strike': strike, 'target_price': target_price}
+                            meta={'pnl_ratio': pnl_ratio, 'strike': strike_price}
                         ))
                         # 清除元数据
                         if symbol in self.position_metadata:
@@ -401,7 +435,33 @@ class StrategyV8(StrategyBase):
                             del self.highest_price_map[symbol]
                         continue
             
-            # ===== 3. 检查止损 =====
+            # ===== 3. 检查动态止损（从最高价下跌） =====
+            if self.trailing_stop_loss > 0 and symbol in self.highest_price_map:
+                highest_price = self.highest_price_map[symbol]
+                trailing_stop_price = highest_price * (1 - self.trailing_stop_loss)
+                
+                if current_price <= trailing_stop_price:
+                    trailing_loss_ratio = (highest_price - current_price) / highest_price
+                    self.logger.info(
+                        f"✓ 平仓决策[动态止损]: {symbol} {can_sell_qty}股 @${current_price:.2f} "
+                        f"(最高${highest_price:.2f}, 触发阈值${trailing_stop_price:.2f}, 从高点下跌{trailing_loss_ratio:.1%})"
+                    )
+                    exit_decisions.append(ExitDecision(
+                        symbol=symbol,
+                        shares=can_sell_qty,
+                        price_limit=current_price,
+                        reason='trailing_stop_loss',
+                        client_id=f"{symbol}_TS_{current_et.strftime('%Y%m%d%H%M%S')}",
+                        meta={'pnl_ratio': pnl_ratio, 'highest_price': highest_price, 'trailing_loss_ratio': trailing_loss_ratio}
+                    ))
+                    # 清除元数据和最高价
+                    if symbol in self.position_metadata:
+                        del self.position_metadata[symbol]
+                    if symbol in self.highest_price_map:
+                        del self.highest_price_map[symbol]
+                    continue
+            
+            # ===== 4. 检查止损 =====
             stop_loss_price = cost_price * (1 - self.stop_loss)
             if current_price <= stop_loss_price:
                 self.logger.info(
@@ -423,7 +483,7 @@ class StrategyV8(StrategyBase):
                     del self.highest_price_map[symbol]
                 continue
             
-            # ===== 4. 检查止盈 =====
+            # ===== 5. 检查止盈 =====
             take_profit_price = cost_price * (1 + self.take_profit)
             if current_price >= take_profit_price:
                 self.logger.info(
