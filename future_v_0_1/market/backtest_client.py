@@ -591,8 +591,10 @@ class BacktestMarketClient:
         }
         self.orders.append(order)
         
+        # 加上时间信息
+        time_str = self.current_time.strftime('%Y-%m-%d %H:%M:%S') if self.current_time else 'N/A'
         self.logger.info(
-            f"Buy: {symbol} {quantity}@${actual_price:.2f} cost=${cost:,.2f}"
+            f"Buy: {symbol} {quantity}@${actual_price:.2f} cost=${cost:,.2f} [时间:{time_str}]"
         )
         
         return order
@@ -642,8 +644,10 @@ class BacktestMarketClient:
         }
         self.orders.append(order)
         
+        # 加上时间信息
+        time_str = self.current_time.strftime('%Y-%m-%d %H:%M:%S') if self.current_time else 'N/A'
         self.logger.info(
-            f"Sell: {symbol} {quantity}@${actual_price:.2f} pnl=${pnl:+,.2f}"
+            f"Sell: {symbol} {quantity}@${actual_price:.2f} pnl=${pnl:+,.2f} [时间:{time_str}]"
         )
         
         return order

@@ -2,39 +2,33 @@
 # -*- coding: utf-8 -*-
 """
 Plot backtest results - Account equity curve analysis
-优化版本，支持JSON和CSV两种格式
+Simplified version - JSON format only
 
-使用方法：
-    1. 修改下面的 CONFIGURATION 部分的参数
-    2. 运行: python plot_account_equity.py
+Usage:
+    1. Modify CONFIGURATION section below
+    2. Run: python plot_account_equity.py
     
-示例：
-    # 绘制V7版本的回测结果（JSON格式）
-    BACKTEST_FILE = 'backtest_v7_final.json'
-    OUTPUT_IMAGE = 'equity_curve_v7.png'
-    
-    # 绘制V6版本的回测结果（CSV格式）
-    BACKTEST_FILE = 'backtest_trades_v6_event_driven.csv'
-    OUTPUT_IMAGE = 'equity_curve_v6.png'
+Example:
+    BACKTEST_FILE = 'backtest_v8_10.json'
+    OUTPUT_IMAGE = 'equity_curve_v8_10.png'
 """
 
 import pandas as pd
 import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
+from datetime import timedelta
 import matplotlib.dates as mdates
 import os
 import json
-from zoneinfo import ZoneInfo
 
 # ============================================================================
 # CONFIGURATION - 修改这里的参数
 # ============================================================================
 
-# 回测结果文件路径（支持.json或.csv格式）
-BACKTEST_FILE = 'backtest_v8_test.json'
+# 回测结果文件路径（仅支持.json格式）
+BACKTEST_FILE = 'backtest_v8_11.json'
 
 # 输出图片文件名
-OUTPUT_IMAGE = 'equity_curve_v8.png'
+OUTPUT_IMAGE = 'equity_curve_v8_11.png'
 
 # 初始资金（如果从JSON读取则会自动使用JSON中的值）
 INITIAL_CAPITAL = 1000000
@@ -51,9 +45,28 @@ plt.rcParams['axes.facecolor'] = 'white'
 plt.rcParams['font.sans-serif'] = ['Arial Unicode MS', 'SimHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
+# Helper functions
+def to_date(dt):
+    """Convert pd.Timestamp or datetime to date object"""
+    return dt.date() if hasattr(dt, 'date') else dt
+
+def update_trade(positions, symbol, shares, price, is_buy):
+    """Update positions with a new trade"""
+    if is_buy:
+        if symbol not in positions:
+            positions[symbol] = {'shares': 0, 'last_price': 0}
+        positions[symbol]['shares'] += shares
+        positions[symbol]['last_price'] = price
+    else:  # SELL
+        if symbol in positions:
+            positions[symbol]['shares'] -= shares
+            positions[symbol]['last_price'] = price
+            if positions[symbol]['shares'] <= 0:
+                del positions[symbol]
+
 def load_backtest_data(filename):
     """
-    Load backtest data from JSON or CSV file
+    Load backtest data from JSON file
     
     Returns:
         tuple: (trades_df, initial_capital, report_dict)
@@ -62,64 +75,45 @@ def load_backtest_data(filename):
         print(f"Error: Cannot find {filename}")
         return None, None, None
     
-    file_ext = os.path.splitext(filename)[1].lower()
-    
-    if file_ext == '.json':
-        # Load JSON format
-        print(f"Loading backtest data from JSON: {filename}...")
+    print(f"Loading backtest data from JSON: {filename}...")
+    try:
         with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
-        initial_capital = data.get('initial_cash', INITIAL_CAPITAL)
-        trades_list = data.get('trades', [])
-        report = data.get('report', {})
-        
-        # Convert trades to DataFrame
-        trades_df = pd.DataFrame(trades_list)
-        
-        # Parse time - handle mixed timezone formats
-        # Some times have timezone (-04:00 or -05:00), some don't
-        # Strategy: parse all times, assume no-timezone times are already in ET
-        parsed_times = []
-        for time_str in trades_df['time']:
-            try:
-                # Try to parse with timezone
-                dt = pd.to_datetime(time_str)
-                if dt.tz is not None:
-                    # Has timezone, convert to ET then remove tz
-                    dt_et = dt.astimezone(ZoneInfo('America/New_York'))
-                    dt_naive = dt_et.replace(tzinfo=None)
-                else:
-                    # No timezone, assume it's already in ET
-                    dt_naive = dt
-                parsed_times.append(dt_naive)
-            except Exception as e:
-                print(f"Warning: Failed to parse time '{time_str}': {e}")
-                parsed_times.append(pd.NaT)
-        
-        trades_df['time'] = pd.Series(parsed_times)
-        
-        print(f"  Total trades: {len(trades_df)}")
-        print(f"  Initial capital: ${initial_capital:,.2f}")
-        if len(trades_df) > 0:
-            print(f"  Date range: {trades_df['time'].iloc[0]} to {trades_df['time'].iloc[-1]}")
-        
-        return trades_df, initial_capital, report
-        
-    elif file_ext == '.csv':
-        # Load CSV format
-        print(f"Loading backtest data from CSV: {filename}...")
-        trades_df = pd.read_csv(filename)
-        trades_df['time'] = pd.to_datetime(trades_df['time'])
-        
-        print(f"  Total trades: {len(trades_df)}")
-        print(f"  Date range: {trades_df['time'].iloc[0]} to {trades_df['time'].iloc[-1]}")
-        
-        return trades_df, INITIAL_CAPITAL, None
-    
-    else:
-        print(f"Error: Unsupported file format: {file_ext}")
+    except Exception as e:
+        print(f"Error: Failed to read JSON file: {e}")
         return None, None, None
+    
+    initial_capital = data.get('initial_cash', INITIAL_CAPITAL)
+    trades_list = data.get('trades', [])
+    report = data.get('report', {})
+    
+    # Convert trades to DataFrame
+    trades_df = pd.DataFrame(trades_list)
+    
+    if len(trades_df) == 0:
+        print("Warning: No trades found in backtest file")
+        return trades_df, initial_capital, report
+    
+    # Parse time - handle mixed timezone formats
+    # JSON times have mixed formats: -04:00 (EDT), -05:00 (EST), etc.
+    parsed_times = []
+    for time_str in trades_df['time']:
+        try:
+            # Parse time and strip timezone info (all times are Eastern Time)
+            dt = pd.to_datetime(time_str)
+            dt_naive = dt.tz_localize(None) if dt.tz is not None else dt
+            parsed_times.append(dt_naive)
+        except Exception as e:
+            print(f"Warning: Failed to parse time '{time_str}': {e}")
+            parsed_times.append(pd.NaT)
+    
+    trades_df['time'] = pd.Series(parsed_times)
+    
+    print(f"Loaded backtest: {len(trades_df)} trades, capital=${initial_capital:,.0f}")
+    if len(trades_df) > 0:
+        print(f"  Date range: {trades_df['time'].iloc[0]} to {trades_df['time'].iloc[-1]}")
+    
+    return trades_df, initial_capital, report
 
 def load_benchmark_data(filename, symbol_name):
     """Load SPY or QQQ data from CSV file"""
@@ -127,21 +121,11 @@ def load_benchmark_data(filename, symbol_name):
         print(f"Warning: Cannot find {filename}")
         return None
     
-    print(f"Loading {symbol_name} data from {filename}...")
     data = pd.read_csv(filename)
-    
-    # Parse Date column with UTC timezone handling
-    data['Date'] = pd.to_datetime(data['Date'], utc=True)
-    
-    # Remove timezone info
-    data['Date'] = data['Date'].dt.tz_localize(None)
-    
-    # Set Date as index
+    data['Date'] = pd.to_datetime(data['Date']).dt.tz_localize(None)
     data.set_index('Date', inplace=True)
     
-    print(f"  Data range: {data.index[0].strftime('%Y-%m-%d')} to {data.index[-1].strftime('%Y-%m-%d')}")
-    print(f"  Total records: {len(data)}")
-    
+    print(f"Loaded {symbol_name}: {len(data)} records from {data.index[0].date()} to {data.index[-1].date()}")
     return data['Close']
 
 def calculate_equity_curve(trades_df, benchmark_prices, initial_capital):
@@ -149,8 +133,8 @@ def calculate_equity_curve(trades_df, benchmark_prices, initial_capital):
     Calculate daily equity curve by marking positions to market
     
     Args:
-        trades_df: DataFrame with trade records (from JSON or CSV)
-        benchmark_prices: Series with daily prices (used for mark-to-market)
+        trades_df: DataFrame with trade records (from JSON)
+        benchmark_prices: Series with daily prices (for reference dates)
         initial_capital: Initial account balance
         
     Returns:
@@ -158,7 +142,8 @@ def calculate_equity_curve(trades_df, benchmark_prices, initial_capital):
     """
     # Initialize tracking
     cash = initial_capital
-    positions = {}  # {symbol: {'shares': int, 'total_cost': float}}
+    # positions structure: {symbol: {'shares': int, 'last_price': float}}
+    positions = {}
     
     # Sort trades by time
     trades_df = trades_df.sort_values('time').reset_index(drop=True)
@@ -169,107 +154,45 @@ def calculate_equity_curve(trades_df, benchmark_prices, initial_capital):
     trade_idx = 0
     
     # Get date range
-    start_date = trades_df['time'].iloc[0].date()
-    end_date = trades_df['time'].iloc[-1].date()
+    start_date = to_date(trades_df['time'].iloc[0])
+    end_date = to_date(trades_df['time'].iloc[-1])
     
-    print(f"\nCalculating equity curve from {start_date} to {end_date}...")
+    print(f"Calculating equity curve from {start_date} to {end_date}...")
     
-    # Generate date range (trading days only - use benchmark dates + extend to cover all trades)
+    # Generate trading dates
     trading_dates = benchmark_prices.index
+    trading_dates = [d for d in trading_dates if start_date <= to_date(d) <= end_date]
     
-    # Filter to date range and convert to list
-    trading_dates = [d for d in trading_dates if start_date <= d.date() <= end_date]
-    
-    # Add a point at the very beginning with initial capital
-    # Find the first trading date before or on start_date
-    first_trading_date = None
-    for d in benchmark_prices.index:
-        if d.date() >= start_date:
-            first_trading_date = d
-            break
-    
-    if first_trading_date is None:
-        first_trading_date = pd.Timestamp(start_date)
-    
-    # Prepend the initial date if it's not already there
-    if len(trading_dates) == 0 or trading_dates[0].date() > start_date:
+    # Ensure we have start and end dates
+    if not trading_dates or to_date(trading_dates[0]) > start_date:
         trading_dates = [pd.Timestamp(start_date)] + trading_dates
     
-    # If last trade date is beyond benchmark data, add it manually
-    if end_date > benchmark_prices.index[-1].date():
-        # Add the missing dates (convert to Timestamp for consistency)
-        current = benchmark_prices.index[-1].date()
+    if end_date > to_date(benchmark_prices.index[-1]):
+        current = to_date(benchmark_prices.index[-1])
         while current < end_date:
-            current = current + timedelta(days=1)
-            # Only add trading days (Mon-Fri, simplified)
+            current += timedelta(days=1)
             if current.weekday() < 5:
                 trading_dates.append(pd.Timestamp(current))
-        
-        print(f"  Extended date range to {end_date} to process all trades")
     
     for current_date in trading_dates:
-        # Process all trades that occurred on or before this date (same day included)
-        # Use date comparison to include all trades within the trading day
-        current_date_only = current_date.date() if isinstance(current_date, pd.Timestamp) else current_date
+        current_date_only = to_date(current_date)
         
+        # Process all trades for this date
         while trade_idx < len(trades_df):
             trade = trades_df.iloc[trade_idx]
-            trade_time = trade['time']  # Already parsed and tz-naive
-            
-            # Compare dates only (include all trades on current_date)
-            trade_date = trade_time.date() if isinstance(trade_time, pd.Timestamp) else trade_time
+            trade_date = to_date(trade['time'])
             
             if trade_date > current_date_only:
                 break
             
-            symbol = trade['symbol']
-            shares = trade['shares']
-            
-            # Determine if BUY or SELL (handle both JSON and CSV formats)
-            if 'type' in trade:
-                # JSON format
-                trade_type = trade['type']
-                amount = trade['amount']
-            else:
-                # CSV format
-                action = trade['action']
-                trade_type = 'BUY' if action in ['BUY', 'ROTATION_BUY_BACK'] else 'SELL'
-                amount = trade['net_value']
-            
-            # Update positions based on trade type
-            if trade_type == 'BUY':
-                # Buy action - decrease cash, increase position
-                cash -= amount
-                if symbol not in positions:
-                    positions[symbol] = {'shares': 0, 'total_cost': 0}
-                positions[symbol]['shares'] += shares
-                positions[symbol]['total_cost'] += amount
-                
-            else:  # SELL
-                # Sell action - increase cash, decrease position
-                cash += amount
-                if symbol in positions:
-                    # Calculate average cost per share
-                    avg_cost = positions[symbol]['total_cost'] / positions[symbol]['shares'] if positions[symbol]['shares'] > 0 else 0
-                    sold_cost = avg_cost * shares
-                    
-                    positions[symbol]['shares'] -= shares
-                    positions[symbol]['total_cost'] -= sold_cost
-                    
-                    # Remove position if fully closed
-                    if positions[symbol]['shares'] <= 0:
-                        del positions[symbol]
+            update_trade(positions, trade['symbol'], trade['shares'], 
+                        trade['price'], trade['type'] == 'BUY')
+            cash += -trade['amount'] if trade['type'] == 'BUY' else trade['amount']
             
             trade_idx += 1
         
-        # Calculate total equity (cash + positions market value)
-        total_equity = cash
-        
-        # Add market value of all positions (using cost basis since we don't have all symbols' prices)
-        for symbol, pos in positions.items():
-            # Use cost basis for mark-to-market
-            total_equity += pos['total_cost']
-        
+        # Calculate equity
+        total_equity = cash + sum(pos['shares'] * pos['last_price'] for pos in positions.values())
         equity_curve.append(total_equity)
         dates.append(current_date)
     
@@ -280,13 +203,14 @@ def calculate_equity_curve(trades_df, benchmark_prices, initial_capital):
     })
     
     # Debug: Print final state
-    print(f"\n  Final cash: ${cash:,.2f}")
-    print(f"  Final positions: {len(positions)}")
-    if len(positions) > 0:
-        total_position_cost = sum(pos['total_cost'] for pos in positions.values())
-        print(f"  Total position cost: ${total_position_cost:,.2f}")
+    print(f"Final: cash=${cash:,.0f}, positions={len(positions)}", end="")
+    if positions:
+        pos_value = sum(pos['shares'] * pos['last_price'] for pos in positions.values())
+        print(f", position_value=${pos_value:,.0f}")
         for symbol, pos in positions.items():
-            print(f"    {symbol}: {pos['shares']} shares, cost ${pos['total_cost']:,.2f}")
+            print(f"  {symbol}: {pos['shares']} shares @ ${pos['last_price']:.2f}")
+    else:
+        print()
     
     return equity_df
 
@@ -420,40 +344,29 @@ def plot_equity_curve():
     
     print("="*70)
     print("Account Equity Curve Analysis")
-    print("="*70)
-    print(f"Configuration:")
-    print(f"  Backtest file: {BACKTEST_FILE}")
-    print(f"  Output image: {OUTPUT_IMAGE}")
+    print(f"  File: {BACKTEST_FILE} → {OUTPUT_IMAGE}")
     print("="*70)
     
     # Load backtest data
     trades_df, initial_capital, report = load_backtest_data(BACKTEST_FILE)
     
-    if trades_df is None:
+    if trades_df is None or len(trades_df) == 0:
+        print("Error: No trades found")
         return
-    
-    if len(trades_df) == 0:
-        print("Error: No trades found in backtest file")
-        return
-    
-    print(f"  Using initial capital: ${initial_capital:,.2f}")
     
     # Load benchmark data
     spy_prices = load_benchmark_data(SPY_DATA_FILE, 'SPY')
     qqq_prices = load_benchmark_data(QQQ_DATA_FILE, 'QQQ')
     
     if spy_prices is None or qqq_prices is None:
-        print("\nError: Cannot load benchmark data")
+        print("Error: Cannot load benchmark data")
         return
     
-    # Calculate equity curve (using QQQ prices for date reference)
+    # Calculate equity curve
     equity_df = calculate_equity_curve(trades_df, qqq_prices, initial_capital)
     
-    print(f"\nEquity curve calculated:")
-    print(f"  Initial: ${equity_df['Equity'].iloc[0]:,.2f}")
-    print(f"  Final: ${equity_df['Equity'].iloc[-1]:,.2f}")
-    print(f"  Min: ${equity_df['Equity'].min():,.2f}")
-    print(f"  Max: ${equity_df['Equity'].max():,.2f}")
+    print(f"Equity curve: ${equity_df['Equity'].iloc[0]:,.0f} → ${equity_df['Equity'].iloc[-1]:,.0f}")
+    print()
     
     # Calculate metrics
     metrics = calculate_metrics(equity_df, initial_capital)
@@ -507,7 +420,7 @@ def plot_equity_curve():
     ax.grid(True, alpha=0.3, linestyle='-', linewidth=0.5)
     
     # Legend
-    ax.legend(loc='upper left', fontsize=11)
+    ax.legend(loc='upper center', fontsize=11)
     
     # Statistics box
     stats_text = f'Initial Capital: ${initial_capital:,.0f}\n'
@@ -565,14 +478,14 @@ def plot_equity_curve():
     print("\n" + "="*100)
     print("PERFORMANCE SUMMARY (from equity curve)")
     print("="*100)
-    print(f"\nOverall Performance:")
+    print("\nOverall Performance:")
     print(f"  Strategy Return:   {metrics['total_return']:>10.2f}%")
     print(f"  SPY Return:        {spy_final_return:>10.2f}%")
     print(f"  QQQ Return:        {qqq_final_return:>10.2f}%")
     print(f"  Excess vs SPY:     {metrics['total_return'] - spy_final_return:>10.2f}%")
     print(f"  Excess vs QQQ:     {metrics['total_return'] - qqq_final_return:>10.2f}%")
     
-    print(f"\nRisk Metrics:")
+    print("\nRisk Metrics:")
     print(f"  Max Drawdown:      {metrics['max_drawdown']:>10.2f}%")
     print(f"  Sharpe Ratio:      {metrics['sharpe_ratio']:>10.2f}")
     if metrics['sortino_ratio'] == float('inf'):

@@ -154,6 +154,13 @@ class BacktestRunnerV8:
             et_tz = pytz.timezone('America/New_York')
             signal_time_et = signal_time_cn.astimezone(et_tz)
             
+            # 添加10分钟延迟（在这里直接加到信号时间上）
+            signal_time_et = signal_time_et + timedelta(minutes=10)
+            
+            # 如果延迟后超过16:00，使用15:59:30
+            if signal_time_et.hour >= 16:
+                signal_time_et = signal_time_et.replace(hour=15, minute=59, second=30)
+            
             # 解析expiry日期
             expiry_date = datetime.strptime(expiry_str, '%Y-%m-%d').date()
             
@@ -219,18 +226,15 @@ class BacktestRunnerV8:
             return
         
         # Group signals by 20-second intervals
+        # 注意：信号时间已在load_signals_from_csv中延迟10分钟
         signals_by_time = {}
         for sig_data in all_signals:
-            sig_time = sig_data['signal'].event_time_et
-            # 向上取整到最近的20秒间隔 + 1个间隔留余地
-            # 但要处理秒数超过60的情况（向分钟进位）
+            sig_time = sig_data['signal'].event_time_et  # 已包含10分钟延迟
+            # 向下取整到20秒间隔（简化版本）
             seconds = sig_time.second
-            interval_second = (seconds // 20) * 20 + 20  # +1 interval for buffer
-            minutes_offset = interval_second // 60
-            interval_second = interval_second % 60
+            interval_second = (seconds // 20) * 20
             sig_time_interval = sig_time.replace(second=interval_second, microsecond=0)
-            if minutes_offset > 0:
-                sig_time_interval = sig_time_interval + timedelta(minutes=minutes_offset)
+            
             if sig_time_interval not in signals_by_time:
                 signals_by_time[sig_time_interval] = []
             signals_by_time[sig_time_interval].append(sig_data)
@@ -247,8 +251,6 @@ class BacktestRunnerV8:
         self.logger.info(f"回测时间: {actual_start_date} 至 {actual_end_date}")
         self.logger.info(f"共 {len(all_signals)} 个信号")
         
-        # 预加载股价数据
-        all_symbols = {sig_data['signal'].symbol for sig_data in all_signals}
         
         # 开始回测
         self.strategy.on_start()
@@ -337,6 +339,13 @@ class BacktestRunnerV8:
                     strike = sig_data['strike']
                     expiry = sig_data['expiry']
                     symbol = signal.symbol
+                    
+                    # 调试：打印前5个信号的时间
+                    if not hasattr(self, '_signal_debug_count'):
+                        self._signal_debug_count = 0
+                    if self._signal_debug_count < 5:
+                        self.logger.info(f"[DEBUG] 处理{symbol}信号: current_time={current_time.strftime('%Y-%m-%d %H:%M:%S')}, signal.event_time_et={signal.event_time_et.strftime('%Y-%m-%d %H:%M:%S')}")
+                        self._signal_debug_count += 1
                     
                     # 策略判断（V8无复杂过滤）
                     decision = self.strategy.on_signal(signal, self.market_client)
@@ -580,7 +589,7 @@ def main():
     
     parser = argparse.ArgumentParser(description='V8策略回测（固定仓位版本）')
     parser.add_argument('--config', '-c', default='config_v8.yaml', help='配置文件')
-    parser.add_argument('--csv', default='future_v_0_1/database/merged_strategy_v1_calls_bell_2023M3_2025M9.csv', help='CSV数据文件')
+    parser.add_argument('--csv', default='future_v_0_1/database/merged_strategy_v1_calls_bell_2023M3_2025M10.csv', help='CSV数据文件')
     parser.add_argument('--stock-dir', '-s', default='future_v_0_1/database/stock_data_csv_min', help='股价目录（backtest_client用）')
     parser.add_argument('--cash', type=float, default=1000000.0, help='初始资金')
     parser.add_argument('--start-date', type=str, default=None, help='开始日期（YYYY-MM-DD）')
