@@ -95,3 +95,4 @@ check_pending_orders.py
 *.json
 *.txt
 *.log
+*.parquet

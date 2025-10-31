@@ -23,6 +23,8 @@ try:
 except ImportError:
     from strategy import StrategyBase, StrategyContext, EntryDecision, ExitDecision
 
+import pandas_market_calendars as mcal
+
 
 class StrategyV8(StrategyBase):
     """V8 事件驱动期权流动量策略 - 简化版本"""
@@ -33,6 +35,9 @@ class StrategyV8(StrategyBase):
         # 读取 strategy 配置
         strategy_cfg = self.cfg.get('strategy', {})
         
+        # === 市场日历 ===
+        self.market_calendar = mcal.get_calendar('NYSE')
+        
         # === 入场配置 ===
         filter_cfg = strategy_cfg.get('filter', {})
         
@@ -42,7 +47,6 @@ class StrategyV8(StrategyBase):
         if not self.trade_time_ranges and 'trade_start_time' in filter_cfg:
             self.trade_time_ranges = [[filter_cfg.get('trade_start_time', '09:30:00'), '16:00:00']]
         
-        self.market_close_buffer = filter_cfg.get('market_close_buffer', 6)
         
         # DTE过滤
         self.dte_min = filter_cfg.get('dte_min', 0)
@@ -55,6 +59,22 @@ class StrategyV8(StrategyBase):
         # Premium过滤
         self.premium_max = filter_cfg.get('premium_max', 999999999)
         self.premium_min = filter_cfg.get('premium_min', 0)
+        
+        # MACD过滤（技术指标，从Polygon API获取）
+        self.macd_enabled = filter_cfg.get('macd_enabled', False)
+        self.macd_threshold = filter_cfg.get('macd_threshold', 0)  # MACD < 0表示看跌
+        self.macd_short_window = filter_cfg.get('macd_short_window', 12)
+        self.macd_long_window = filter_cfg.get('macd_long_window', 26)
+        self.macd_signal_window = filter_cfg.get('macd_signal_window', 9)
+        self.macd_timespan = filter_cfg.get('macd_timespan', 'day')
+        
+        # Earnings过滤（距离earnings日期的天数）
+        self.earnings_enabled = filter_cfg.get('earnings_enabled', False)
+        self.earnings_max = filter_cfg.get('earnings_max', 5)  # 最小距离earnings天数，小于这个值就过滤
+        
+        # 价格趋势过滤（比较-1天 vs -21天的收盘价）
+        self.price_trend_enabled = filter_cfg.get('price_trend_enabled', False)
+        self.price_trend_lookback = filter_cfg.get('price_trend_lookback', 21)
         
         # === 仓位配置（固定20%）===
         position_cfg = strategy_cfg.get('position_compute', {})
@@ -75,10 +95,12 @@ class StrategyV8(StrategyBase):
         # 打印配置信息
         time_ranges_str = ', '.join([f"{r[0]}-{r[1]}" for r in self.trade_time_ranges]) if self.trade_time_ranges else '全天'
         premium_str = f"${self.premium_min:,.0f}-${self.premium_max:,.0f}" if self.premium_max < 999999999 else f">${self.premium_min:,.0f}"
+        macd_str = f"MACD过滤启用 (threshold={self.macd_threshold})" if self.macd_enabled else "MACD过滤禁用"
         
         self.logger.info(
             f"StrategyV8 初始化完成:\n"
             f"  入场: 时间={time_ranges_str}, DTE={self.dte_min}-{self.dte_max}天, OTM={self.otm_min:.1f}-{self.otm_max:.1f}%, Premium={premium_str}\n"
+            f"  MACD: {macd_str}\n"
             f"  仓位: 固定{self.fixed_position_ratio:.0%}, 日限<={self.max_daily_position:.0%}\n"
             f"  出场: strike/expiry(10:00)/止盈{self.take_profit:+.0%}/止损{self.stop_loss:+.0%}"
         )
@@ -98,6 +120,58 @@ class StrategyV8(StrategyBase):
     def on_day_close(self, trading_date_et: date):
         """交易日收盘"""
         self.logger.info(f"交易日收盘: {trading_date_et}")
+
+    def _get_trading_day_before(self, target_date: date, num_trading_days: int) -> date:
+        """
+        计算target_date之前第num_trading_days个交易日
+        
+        Args:
+            target_date: 参考日期
+            num_trading_days: 往前回溯的交易日数（例如21表示21个交易日前）
+        
+        Returns:
+            date: 往前第num_trading_days个交易日的日期
+        
+        Raises:
+            ValueError: 如果无法找到足够多的交易日
+        """
+        # 获取从target_date向前200天的所有交易日（足够了）
+        from datetime import timedelta
+        search_start = target_date - timedelta(days=300)  # 向前查找300天，足以找到21个交易日
+        
+        valid_days = self.market_calendar.valid_days(start_date=search_start, end_date=target_date)
+        
+        # valid_days是升序排列的，我们需要找倒数第num_trading_days个
+        if len(valid_days) < num_trading_days + 1:  # +1因为我们需要至少比target_date早num_trading_days个交易日
+            raise ValueError(
+                f"无法找到足够的交易日。要求从 {target_date} 回溯 {num_trading_days} 个交易日，"
+                f"但在过去300天内只找到 {len(valid_days)} 个交易日。"
+            )
+        
+        # 找到target_date对应的索引
+        target_idx = None
+        for i, day in enumerate(valid_days):
+            if day.date() == target_date:
+                target_idx = i
+                break
+        
+        if target_idx is None:
+            raise ValueError(
+                f"目标日期 {target_date} 不是交易日。"
+            )
+        
+        # 返回从target_date向前num_trading_days个交易日
+        lookback_idx = target_idx - num_trading_days
+        if lookback_idx < 0:
+            raise ValueError(
+                f"无法回溯 {num_trading_days} 个交易日。从 {target_date} 往前只有 {target_idx} 个交易日。"
+            )
+        
+        result_date = valid_days[lookback_idx].date()
+        self.logger.debug(
+            f"交易日计算: 从 {target_date} 回溯 {num_trading_days} 个交易日 → {result_date}"
+        )
+        return result_date
 
     def on_signal(self, ev, market_client=None):
         """
@@ -136,7 +210,7 @@ class StrategyV8(StrategyBase):
                 return None
         
         # 检查距离收盘时间
-        market_close = time(15, 54, 0)
+        market_close = time(15, 59, 0)
         if current_time >= market_close:
             self.logger.info(
                 f"过滤[接近收盘]: {ev.symbol} 时间={current_time}"
@@ -207,7 +281,86 @@ class StrategyV8(StrategyBase):
                 )
                 return None
         
-        # ===== 4. 获取股票价格（用于实际买入）=====
+        # ===== 4. MACD过滤（技术指标，从Polygon API获取）=====
+        if self.macd_enabled:
+            macd_value = market_client.get_stock_macd(
+                ev.symbol,
+                timestamp=ev.event_time_et,
+                short_window=self.macd_short_window,
+                long_window=self.macd_long_window,
+                signal_window=self.macd_signal_window,
+                timespan=self.macd_timespan
+            )
+            
+            if macd_value is None:
+                self.logger.debug(
+                    f"过滤[MACD查询失败]: {ev.symbol} 无法获取MACD数据，跳过MACD过滤"
+                )
+            else:
+                if macd_value < self.macd_threshold:
+                    self.logger.info(
+                        f"过滤[MACD看跌]: {ev.symbol} MACD={macd_value:.4f} < {self.macd_threshold}"
+                    )
+                    return None
+        
+        # ===== 5. Earnings过滤（距离earnings日期天数）=====
+        if self.earnings_enabled:
+            earnings = ev.earnings
+            
+            if earnings is None:
+                self.logger.debug(
+                    f"过滤[Earnings缺失]: {ev.symbol} 缺少earnings信息，跳过earnings过滤"
+                )
+            else:
+                if earnings < self.earnings_max:
+                    self.logger.info(
+                        f"过滤[Earnings太近]: {ev.symbol} earnings={earnings}天 < {self.earnings_max}天（太接近earnings日，不交易）"
+                    )
+                    return None
+        
+        # ===== 6. 价格趋势过滤（对比-1天 vs -21天收盘价）=====
+        if self.price_trend_enabled:
+            from datetime import timedelta
+            
+            signal_date = ev.event_time_et.date()
+            
+            # 获取-1交易日收盘价
+            try:
+                price_minus_1_date = self._get_trading_day_before(signal_date, 1)
+                price_minus_1 = market_client.get_day_close_price(ev.symbol, price_minus_1_date, max_lookback_days=5)
+                
+                if price_minus_1 is None:
+                    self.logger.debug(
+                        f"过滤[价格数据缺失]: {ev.symbol} 无法获取-1交易日收盘价，跳过价格趋势过滤"
+                    )
+                    price_minus_1 = None
+            except (ValueError, KeyError) as e:
+                self.logger.debug(f"交易日计算失败（-1天）: {e}，跳过价格趋势过滤")
+                price_minus_1 = None
+            
+            # 获取-lookback交易日收盘价
+            try:
+                date_minus_lookback = self._get_trading_day_before(signal_date, self.price_trend_lookback)
+                price_minus_lookback = market_client.get_day_close_price(ev.symbol, date_minus_lookback, max_lookback_days=5)
+                
+                if price_minus_lookback is None:
+                    self.logger.debug(
+                        f"过滤[价格数据缺失]: {ev.symbol} 无法获取-{self.price_trend_lookback}交易日收盘价，跳过价格趋势过滤"
+                    )
+                    price_minus_lookback = None
+            except (ValueError, KeyError) as e:
+                self.logger.debug(f"交易日计算失败(-{self.price_trend_lookback}天): {e}，跳过价格趋势过滤")
+                price_minus_lookback = None
+            
+            # 如果两个价格都能获取，检查趋势
+            if price_minus_1 is not None and price_minus_lookback is not None:
+                if price_minus_1 < price_minus_lookback:
+                    self.logger.info(
+                        f"过滤[价格下跌]: {ev.symbol} -1交易日收盘价${price_minus_1:.2f} < -{self.price_trend_lookback}交易日${price_minus_lookback:.2f}（下跌趋势，不交易）"
+                    )
+                    return None
+        
+        # ===== 7. 获取股票价格（用于实际买入）=====
         # 注意：market_client.current_time已在主循环中设置，这里无需再设置
         
         price_info = market_client.get_stock_price(ev.symbol)
@@ -224,7 +377,7 @@ class StrategyV8(StrategyBase):
             self.logger.info(f"[DEBUG] {ev.symbol} market_client.current_time={market_client.current_time.strftime('%Y-%m-%d %H:%M:%S')}, 价格=${current_price:.4f}")
             self._price_debug_count += 1
         
-        # ===== 5. 获取账户信息 =====
+        # ===== 6. 获取账户信息 =====
         acc_info = market_client.get_account_info()
         if not acc_info:
             self.logger.error("获取账户信息失败")
@@ -233,7 +386,7 @@ class StrategyV8(StrategyBase):
         total_assets = acc_info['total_assets']
         cash = acc_info['cash']
         
-        # ===== 6. 计算仓位（固定比例）=====
+        # ===== 7. 计算仓位（固定比例）=====
         target_value = total_assets * self.fixed_position_ratio
         qty = int(target_value / current_price)
         
@@ -248,7 +401,7 @@ class StrategyV8(StrategyBase):
             f"{qty}股 × ${current_price:.2f} = ${target_cost:,.2f}"
         )
         
-        # ===== 7. 检查总仓位限制 =====
+        # ===== 8. 检查总仓位限制 =====
         positions = market_client.get_positions()
         current_position_value = 0
         
@@ -272,20 +425,20 @@ class StrategyV8(StrategyBase):
             )
             return None
         
-        # ===== 8. 检查现金充足性 =====
+        # ===== 9. 检查现金充足性 =====
         if cash < target_cost:
             self.logger.info(
                 f"过滤: {ev.symbol} 现金不足 需要${target_cost:,.2f}, 剩余${cash:,.2f}"
             )
             return None
         
-        # ===== 9. 生成开仓决策 =====
+        # ===== 10. 生成开仓决策 =====
         # 注意：信号时间已在run_backtest_v8.py聚合阶段延迟10分钟
         # 这里的event_time_et已经是延迟后的时间，无需再计算
         signal_time = ev.event_time_et
         exec_time = signal_time
         
-        # ===== 10. 生成开仓决策 =====
+        # ===== 11. 生成开仓决策 =====
         client_id = f"{ev.symbol}_{ev.event_time_et.strftime('%Y%m%d%H%M%S')}"
         
         # 构建详细日志

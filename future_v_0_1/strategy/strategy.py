@@ -24,6 +24,8 @@ class SignalEvent:
     expiry: Optional[date] = None
     spot: Optional[float] = None  # option price from signal
     stock_price: Optional[float] = None  # stock price from signal (CSV price column)
+    iv_pct: Optional[float] = None  # implied volatility percentage from CSV
+    earnings: Optional[int] = None  # earnings from signal
 
 
 @dataclass

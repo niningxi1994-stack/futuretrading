@@ -9,9 +9,10 @@ import requests
 import pandas as pd
 import json
 import pandas_market_calendars as mcal
+import duckdb
 from pathlib import Path
 from typing import Optional, Dict, List, Set
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
@@ -29,7 +30,7 @@ class BacktestMarketClient:
     
     def __init__(self, stock_data_dir: str = None, initial_cash: float = 100000.0,
                  slippage: float = 0.0005, commission_per_share: float = 0.005, 
-                 min_commission: float = 1.0):
+                 min_commission: float = 1.0, cache_dir: str = None):
         """
         Initialize backtesting client
         
@@ -39,6 +40,7 @@ class BacktestMarketClient:
             slippage: Single-side slippage (default 0.05%)
             commission_per_share: Commission per share (default $0.005)
             min_commission: Minimum commission (default $1)
+            cache_dir: Local cache directory for parquet files (default: ./data_cache)
         """
         self.logger = logging.getLogger(self.__class__.__name__)
         
@@ -46,6 +48,13 @@ class BacktestMarketClient:
         self.api_key = os.getenv('POLYGON_API_KEY')
         if not self.api_key:
             raise ValueError("POLYGON_API_KEY not found in .env file")
+        
+        # Local cache directory (parquet files)
+        if cache_dir is None:
+            cache_dir = Path(__file__).parent.parent / 'database' / 'data_cache'
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.logger.info(f"Local cache directory: {self.cache_dir}")
         
         # Data cache {symbol_date: DataFrame}
         self.price_cache: Dict[str, pd.DataFrame] = {}
@@ -136,9 +145,96 @@ class BacktestMarketClient:
             self.logger.warning(f"Failed to fetch {symbol} on {date_str}: {e}")
             return None
     
+    def _load_from_local_cache(self, symbol: str, start_date, end_date) -> Optional[Dict[str, pd.DataFrame]]:
+        """Load data from local parquet cache using DuckDB"""
+        try:
+            # Check if cache file exists
+            cache_file = self.cache_dir / f"{symbol}.parquet"
+            if not cache_file.exists():
+                return None
+            
+            start_str = start_date.isoformat() if hasattr(start_date, 'isoformat') else str(start_date)
+            end_str = end_date.isoformat() if hasattr(end_date, 'isoformat') else str(end_date)
+            
+            # Use pandas to read parquet file (better timezone handling than DuckDB)
+            df = pd.read_parquet(cache_file)
+            
+            # Filter by date range
+            df = df[(df['date'] >= start_str) & (df['date'] <= end_str)]
+            
+            if len(df) == 0:
+                return None
+            
+            # Check if we have data for the start_date (important!)
+            # If start_date is not in cache, we should fetch from API
+            dates_in_cache = set(df['date'].unique())
+            if start_str not in dates_in_cache:
+                self.logger.debug(f"缓存中没有 {symbol} 在 {start_str} 的数据，需要从 API 获取")
+                return None
+            
+            # Ensure datetime column has correct timezone (already stored with ET timezone)
+            if df['datetime'].dt.tz is None:
+                et_tz = pytz.timezone('America/New_York')
+                df['datetime'] = df['datetime'].dt.tz_localize(et_tz)
+            
+            # Group by date
+            result = {}
+            for date_str, group in df.groupby('date'):
+                cache_key = f"{symbol}_{date_str}"
+                group_df = group[['datetime', 'close']].copy()
+                group_df.set_index('datetime', inplace=True)
+                result[cache_key] = group_df
+            
+            self.logger.info(f"💾 Loaded {symbol} from local cache: {len(result)} days, {len(df)} records")
+            return result
+            
+        except Exception as e:
+            self.logger.debug(f"Failed to load from local cache: {e}")
+            return None
+    
+    def _save_to_local_cache(self, symbol: str, daily_data: Dict[str, pd.DataFrame]):
+        """Save data to local parquet cache"""
+        try:
+            cache_file = self.cache_dir / f"{symbol}.parquet"
+            
+            # Convert daily_data to single DataFrame
+            rows = []
+            for cache_key, df in daily_data.items():
+                date_str = cache_key.split('_', 1)[1]
+                for idx, row in df.iterrows():
+                    rows.append({
+                        'date': date_str,
+                        'datetime': idx,
+                        'close': row['close']
+                    })
+            
+            if not rows:
+                return
+            
+            new_df = pd.DataFrame(rows)
+            
+            # If cache file exists, merge with existing data
+            if cache_file.exists():
+                try:
+                    existing_df = pd.read_parquet(cache_file)
+                    # Remove duplicates and concatenate
+                    combined_df = pd.concat([existing_df, new_df]).drop_duplicates(subset=['datetime'])
+                    combined_df.to_parquet(cache_file, index=False)
+                    self.logger.debug(f"💾 Updated local cache: {cache_file}")
+                except Exception as e:
+                    self.logger.debug(f"Failed to merge cache, overwriting: {e}")
+                    new_df.to_parquet(cache_file, index=False)
+            else:
+                new_df.to_parquet(cache_file, index=False)
+                self.logger.debug(f"💾 Created local cache: {cache_file}")
+                
+        except Exception as e:
+            self.logger.debug(f"Failed to save to local cache: {e}")
+    
     def _fetch_range_data(self, symbol: str, start_date, end_date) -> Optional[Dict[str, pd.DataFrame]]:
         """
         Fetch multi-day data with pagination support (完整获取所有数据！)
+        先从本地缓存读取，如果没有再调用API
         
         Args:
             symbol: Stock symbol
@@ -150,6 +246,12 @@ class BacktestMarketClient:
         """
         start_str = start_date.isoformat() if hasattr(start_date, 'isoformat') else str(start_date)
         end_str = end_date.isoformat() if hasattr(end_date, 'isoformat') else str(end_date)
+        
+        # Try to load from local cache first
+        cached_data = self._load_from_local_cache(symbol, start_date, end_date)
+        if cached_data is not None:
+            self.cache_hits += 1
+            return cached_data
         
         try:
             all_results = []
@@ -218,6 +320,10 @@ class BacktestMarketClient:
                 self.logger.debug(f"Cached {cache_key}: {len(df)} records")
             
             self.logger.info(f"Fetched {symbol} range: {len(result)} days, {sum(len(df) for df in result.values())} total records")
+            
+            # Save to local cache
+            self._save_to_local_cache(symbol, result)
+            
             return result
             
         except Exception as e:
@@ -394,72 +500,134 @@ class BacktestMarketClient:
         cache_key = f"{symbol}_{target_time.date().isoformat()}"
         target_date = target_time.date()
         
-        # 检查是否是交易日，如果不是就用最近的交易日
-        try:
-            valid_days = self.market_calendar.valid_days(start_date=target_date, end_date=target_date)
-            if len(valid_days) == 0:
-                # 不是交易日，找最近的前一个交易日
-                valid_days = self.market_calendar.valid_days(
-                    start_date=target_date - timedelta(days=10),
-                    end_date=target_date - timedelta(days=1)
-                )
-                if len(valid_days) > 0:
-                    target_date = pd.Timestamp(valid_days[-1]).date()
-                    cache_key = f"{symbol}_{target_date.isoformat()}"
-                else:
-                    return None
-        except Exception as e:
-            self.logger.debug(f"Error checking trading calendar: {e}")
-          
         if cache_key not in self.price_cache:
-            # 检查是否超出预加载范围，如果是就自动扩展
-            if symbol in self.prefetch_ranges:
-                start_range, end_range = self.prefetch_ranges[symbol]
-                if target_date > end_range:
-                    # 超出范围，自动预加载下一个6天
-                    self.logger.info(f"📦 扩展预加载 {symbol}（从{target_date}开始，再加6天）")
-                    self.prefetch_multiple_days(symbol, target_date, days=6)
-            else:
-                # 首次遇到该符号，预加载6天
+            # Check if target_date is within prefetch_ranges
+            # If not, we need to prefetch data for that range
+            needs_prefetch = False
+            
+            if symbol not in self.prefetch_ranges:
+                # First time seeing this symbol, prefetch 6 days starting from target_date
                 self.logger.info(f"📦 首次预加载 {symbol} 的6天数据（从{target_date}开始）")
                 self.prefetch_multiple_days(symbol, target_date, days=6)
+                needs_prefetch = True
+            else:
+                start_range, end_range = self.prefetch_ranges[symbol]
+                if target_date < start_range or target_date > end_range:
+                    # Out of range, need to prefetch
+                    self.logger.info(f"📦 预加载范围外，重新预加载 {symbol}（目标日期{target_date}，当前范围{start_range}到{end_range}）")
+                    self.prefetch_multiple_days(symbol, target_date, days=6)
+                    needs_prefetch = True
             
-            # 预加载完成后，如果target_date对应的key还是不存在（停盘日期）
-            # 就找范围内最近的有数据的日期
+            # After prefetch, if the exact cache_key still doesn't exist, try to find nearby date
             if cache_key not in self.price_cache:
-                available_keys = [key for key in self.price_cache.keys() if key.startswith(f"{symbol}_")]
-                if available_keys:
-                    # 找最接近但不超过 target_date 的 key
-                    available_keys.sort()
-                    found_key = None
-                    for key in available_keys:
-                        date_str = key.split('_', 1)[1]
-                        try:
-                            key_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-                            if key_date <= target_date:
-                                found_key = key
-                        except ValueError:
-                            pass
-                    if found_key:
-                        cache_key = found_key
-        
-        # 最终检查：如果cache_key还是不存在，返回None
-        if cache_key not in self.price_cache:
-            self.logger.warning(f"无法获取 {symbol} 在 {target_date} 的价格数据")
-            return None
+                # Try to find a nearby date with data (within 5 days)
+                found_key = None
+                for lookback in range(1, 6):
+                    check_date = target_date - timedelta(days=lookback)
+                    check_key = f"{symbol}_{check_date.isoformat()}"
+                    if check_key in self.price_cache:
+                        found_key = check_key
+                        self.logger.debug(f"使用 {symbol} 在 {check_date} 的数据替代 {target_date}")
+                        break
+                
+                if found_key:
+                    cache_key = found_key
+                else:
+                    self.logger.warning(f"无法获取 {symbol} 在 {target_date} 附近的价格数据（已回溯5天）")
+                    return None
         
         df = self.price_cache[cache_key]
+        
+        if len(df) == 0:
+            self.logger.warning(f"{symbol} 在 {target_date} 的数据为空")
+            return None
          
         try:
-            # 在该日期的数据中找小于等于target_time的最近价格
-            # method='pad' = forward fill，找不到则用前一条数据（同日内）
-            # 重要：不跨天填充，只在同一天的数据中填充
-            idx = df.index.get_indexer([target_time], method='pad')
-            if idx[0] >= 0:
-                return float(df.iloc[idx[0]]['close'])
+            # 获取当天数据的时间范围
+            first_time = df.index[0]
+            last_time = df.index[-1]
+            
+            # 情况1: 查询时间在数据范围内 → 使用 forward-fill
+            if target_time >= first_time:
+                idx = df.index.get_indexer([target_time], method='pad')
+                if idx[0] >= 0:
+                    return round(float(df.iloc[idx[0]]['close']), 2)
+            
+            # 情况2: 查询时间早于当天第一条数据（如 09:30:00 早于 09:30:01）
+            # → 尝试用前一天的收盘价
+            if target_time < first_time:
+                self.logger.debug(f"查询时间 {target_time} 早于 {symbol} 当天第一条数据 {first_time}")
+                
+                # 尝试获取前一天的收盘价
+                prev_date = target_date - timedelta(days=1)
+                lookback_count = 0
+                while lookback_count < 5:
+                    prev_key = f"{symbol}_{prev_date.isoformat()}"
+                    if prev_key in self.price_cache:
+                        prev_df = self.price_cache[prev_key]
+                        if len(prev_df) > 0:
+                            prev_close = round(float(prev_df.iloc[-1]['close']), 2)
+                            self.logger.debug(f"使用前一天 {prev_date} 的收盘价: ${prev_close:.2f}")
+                            return prev_close
+                    
+                    prev_date -= timedelta(days=1)
+                    lookback_count += 1
+                
+                # 如果找不到前一天数据，使用当天第一条数据
+                self.logger.debug(f"无法找到前一天数据，使用当天第一条数据（开盘价）")
+                return round(float(df.iloc[0]['close']), 2)
+                
         except Exception as e:
             self.logger.debug(f"Error getting price for {symbol}: {e}")
         
+        self.logger.warning(f"无法在 {symbol} 的 {target_date} 数据中找到 {target_time} 的价格")
+        return None
+    
+    def get_day_close_price(self, symbol: str, target_date: date, max_lookback_days: int = 5) -> Optional[float]:
+        """
+        高效获取某一天的收盘价（16:00收盘价）
+        
+        相比get_price_at_time()快得多，因为不需要匹配具体时间戳
+        自动回退：如果target_date无数据，向前回溯找最近的交易日（最多回溯max_lookback_days）
+        
+        Args:
+            symbol: Stock symbol
+            target_date: 目标日期
+            max_lookback_days: 最多向前回溯的交易日数
+        
+        Returns:
+            float: 收盘价，或None（无法找到）
+        """
+        # 首先检查是否需要预加载
+        cache_key = f"{symbol}_{target_date.isoformat()}"
+        if cache_key not in self.price_cache:
+            if symbol not in self.prefetch_ranges:
+                self.logger.debug(f"首次预加载 {symbol}（目标日期{target_date}）")
+                self.prefetch_multiple_days(symbol, target_date, days=6)
+            else:
+                start_range, end_range = self.prefetch_ranges[symbol]
+                if target_date < start_range or target_date > end_range:
+                    self.logger.debug(f"预加载范围外，重新预加载 {symbol}（目标日期{target_date}）")
+                    self.prefetch_multiple_days(symbol, target_date, days=6)
+        
+        # 向前回溯，找最近的有数据的交易日
+        current_date = target_date
+        lookback_count = 0
+        
+        while lookback_count <= max_lookback_days:
+            check_key = f"{symbol}_{current_date.isoformat()}"
+            if check_key in self.price_cache:
+                df = self.price_cache[check_key]
+                if len(df) > 0:
+                    # 获取该日期的最后一条记录（收盘价），round到2位小数
+                    return round(float(df.iloc[-1]['close']), 2)
+            
+            # 向前回溯一天
+            current_date -= timedelta(days=1)
+            lookback_count += 1
+        
+        # 无法找到
+        self.logger.warning(f"无法获取 {symbol} 在 {target_date} 附近的价格数据（已回溯{max_lookback_days}天）")
         return None
     
     def set_current_time(self, current_time: datetime):
@@ -471,8 +639,9 @@ class BacktestMarketClient:
             if self.positions[symbol]['position'] > 0:
                 price = self.get_price_at_time(symbol, current_time)
                 if price:
+                    price = round(price, 2)
                     self.positions[symbol]['market_price'] = price
-                    self.positions[symbol]['market_value'] = price * self.positions[symbol]['position']
+                    self.positions[symbol]['market_value'] = round(price * self.positions[symbol]['position'], 2)
                     
                     if 'highest_price' not in self.positions[symbol]:
                         self.positions[symbol]['highest_price'] = self.positions[symbol]['cost_price']
@@ -492,11 +661,181 @@ class BacktestMarketClient:
         if price:
             return {
                 'last_price': price,
-                'bid': price * 0.999,
-                'ask': price * 1.001,
+                'bid': round(price * 0.999, 2),
+                'ask': round(price * 1.001, 2),
             }
         
         return None
+    
+    def get_stock_rsi(self, symbol: str, timestamp: datetime = None, window: int = 14, timespan: str = "day") -> Optional[float]:
+        """
+        Get RSI (Relative Strength Index) for a stock using Polygon API
+        
+        Args:
+            symbol: Stock ticker symbol
+            timestamp: Query timestamp (if None, use self.current_time)
+            window: RSI calculation window (default 14)
+            timespan: Time granularity - "day", "hour", "minute" (default "day")
+        
+        Returns:
+            RSI value (0-100) or None if query fails or data not available
+        """
+        if not timestamp:
+            timestamp = self.current_time
+        
+        if not timestamp:
+            self.logger.warning(f"get_stock_rsi: No timestamp available for {symbol}")
+            return None
+        
+        try:
+            # Format timestamp as YYYY-MM-DD for Polygon API
+            timestamp_str = timestamp.strftime('%Y-%m-%d')
+            
+            # Build API request URL - use v1/indicators/rsi endpoint (not v2/aggs/ticker)
+            url = f"https://api.polygon.io/v1/indicators/rsi/{symbol}"
+            params = {
+                'timestamp': timestamp_str,
+                'window': window,
+                'timespan': timespan,
+                'series_type': 'close',
+                'apikey': self.api_key
+            }
+            
+            # Make API request
+            response = requests.get(url, params=params, timeout=10)
+            
+            # Handle 404 - symbol not found or not supported
+            if response.status_code == 404:
+                self.logger.debug(f"RSI data not available for {symbol} (404 Not Found)")
+                return None
+            
+            # Raise for other HTTP errors
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Check if request was successful
+            if data.get('status') != 'OK':
+                self.logger.debug(f"RSI query failed for {symbol}: {data.get('message', 'Unknown error')}")
+                return None
+            
+            # Extract RSI value from results
+            results = data.get('results', {})
+            if not results or 'values' not in results or len(results['values']) == 0:
+                self.logger.debug(f"No RSI data available for {symbol} on {timestamp_str}")
+                return None
+            
+            # Get the most recent RSI value
+            rsi_value = results['values'][0].get('value')
+            
+            if rsi_value is not None:
+                self.logger.info(f"✓ RSI for {symbol}: {rsi_value:.2f} (window={window})")
+                self.api_calls += 1
+                return float(rsi_value)
+            
+            return None
+            
+        except requests.exceptions.Timeout:
+            self.logger.debug(f"RSI query timeout for {symbol}")
+            return None
+        except requests.exceptions.HTTPError as e:
+            # Handle other HTTP errors (5xx, rate limits, etc)
+            self.logger.debug(f"RSI query HTTP error for {symbol}: {e.response.status_code}")
+            return None
+        except requests.exceptions.RequestException as e:
+            self.logger.debug(f"RSI query network error for {symbol}: {str(e)}")
+            return None
+        except (KeyError, ValueError, TypeError) as e:
+            self.logger.debug(f"RSI data parsing error for {symbol}: {str(e)}")
+            return None
+    
+    def get_stock_macd(self, symbol: str, timestamp: datetime = None, short_window: int = 12, long_window: int = 26, signal_window: int = 9, timespan: str = "day") -> Optional[float]:
+        """
+        Get MACD (Moving Average Convergence Divergence) for a stock using Polygon API
+        
+        Args:
+            symbol: Stock ticker symbol
+            timestamp: Query timestamp (if None, use self.current_time)
+            short_window: Short EMA window (default 12)
+            long_window: Long EMA window (default 26)
+            signal_window: Signal line window (default 9)
+            timespan: Time granularity - "day", "hour", "minute" (default "day")
+        
+        Returns:
+            MACD value (can be positive or negative) or None if query fails
+            Positive MACD = Bullish trend
+            Negative MACD = Bearish trend
+        """
+        if not timestamp:
+            timestamp = self.current_time
+        
+        if not timestamp:
+            self.logger.warning(f"get_stock_macd: No timestamp available for {symbol}")
+            return None
+        
+        try:
+            # Format timestamp as YYYY-MM-DD for Polygon API
+            timestamp_str = timestamp.strftime('%Y-%m-%d')
+            
+            # Build API request URL - use v1/indicators/macd endpoint
+            url = f"https://api.polygon.io/v1/indicators/macd/{symbol}"
+            params = {
+                'timestamp': timestamp_str,
+                'short_window': short_window,
+                'long_window': long_window,
+                'signal_window': signal_window,
+                'timespan': timespan,
+                'series_type': 'close',
+                'apikey': self.api_key
+            }
+            
+            # Make API request
+            response = requests.get(url, params=params, timeout=10)
+            
+            # Handle 404 - symbol not found or not supported
+            if response.status_code == 404:
+                self.logger.debug(f"MACD data not available for {symbol} (404 Not Found)")
+                return None
+            
+            # Raise for other HTTP errors
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Check if request was successful
+            if data.get('status') != 'OK':
+                self.logger.debug(f"MACD query failed for {symbol}: {data.get('message', 'Unknown error')}")
+                return None
+            
+            # Extract MACD value from results
+            results = data.get('results', {})
+            if not results or 'values' not in results or len(results['values']) == 0:
+                self.logger.debug(f"No MACD data available for {symbol} on {timestamp_str}")
+                return None
+            
+            # Get the most recent MACD value
+            macd_value = results['values'][0].get('value')
+            
+            if macd_value is not None:
+                self.logger.info(f"✓ MACD for {symbol}: {macd_value:.4f} (short={short_window}, long={long_window})")
+                self.api_calls += 1
+                return float(macd_value)
+            
+            return None
+            
+        except requests.exceptions.Timeout:
+            self.logger.debug(f"MACD query timeout for {symbol}")
+            return None
+        except requests.exceptions.HTTPError as e:
+            # Handle other HTTP errors (5xx, rate limits, etc)
+            self.logger.debug(f"MACD query HTTP error for {symbol}: {e.response.status_code}")
+            return None
+        except requests.exceptions.RequestException as e:
+            self.logger.debug(f"MACD query network error for {symbol}: {str(e)}")
+            return None
+        except (KeyError, ValueError, TypeError) as e:
+            self.logger.debug(f"MACD data parsing error for {symbol}: {str(e)}")
+            return None
     
     def get_account_info(self) -> Optional[Dict]:
         """Get account info"""
@@ -532,9 +871,9 @@ class BacktestMarketClient:
     def buy_stock(self, symbol: str, quantity: int, price: float, 
                   order_type: str = 'LIMIT') -> Optional[Dict]:
         """Buy stock (with slippage and commission)"""
-        actual_price = price * (1 + self.slippage)
-        commission = max(quantity * self.commission_per_share, self.min_commission)
-        cost = actual_price * quantity + commission
+        actual_price = round(price * (1 + self.slippage), 2)
+        commission = round(max(quantity * self.commission_per_share, self.min_commission), 2)
+        cost = round(actual_price * quantity + commission, 2)
         
         acc_info = self.get_account_info()
         total_assets = acc_info['total_assets']
@@ -556,20 +895,20 @@ class BacktestMarketClient:
             old_cost = old_pos['cost_price']
             
             new_shares = old_shares + quantity
-            new_cost = (old_cost * old_shares + actual_price * quantity) / new_shares
+            new_cost = round((old_cost * old_shares + actual_price * quantity) / new_shares, 2)
             
             self.positions[symbol] = {
                 'position': new_shares,
                 'cost_price': new_cost,
                 'market_price': actual_price,
-                'market_value': actual_price * new_shares,
+                'market_value': round(actual_price * new_shares, 2),
             }
         else:
             self.positions[symbol] = {
                 'position': quantity,
                 'cost_price': actual_price,
                 'market_price': actual_price,
-                'market_value': actual_price * quantity,
+                'market_value': round(actual_price * quantity, 2),
                 'highest_price': actual_price,
             }
         
@@ -606,9 +945,9 @@ class BacktestMarketClient:
             self.logger.warning(f"Sell failed: insufficient position {symbol}")
             return None
         
-        actual_price = price * (1 - self.slippage)
-        commission = max(quantity * self.commission_per_share, self.min_commission)
-        proceeds = actual_price * quantity - commission
+        actual_price = round(price * (1 - self.slippage), 2)
+        commission = round(max(quantity * self.commission_per_share, self.min_commission), 2)
+        proceeds = round(actual_price * quantity - commission, 2)
         
         self.cash += proceeds
         
@@ -616,7 +955,7 @@ class BacktestMarketClient:
         cost_price = pos['cost_price']
         
         pos['position'] -= quantity
-        pos['market_value'] = pos['market_price'] * pos['position']
+        pos['market_value'] = round(pos['market_price'] * pos['position'], 2)
         
         if pos['position'] == 0:
             del self.positions[symbol]
@@ -624,7 +963,7 @@ class BacktestMarketClient:
         order_id = f"SELL_{self.order_id_counter:06d}"
         self.order_id_counter += 1
         
-        pnl = (actual_price - cost_price) * quantity - commission
+        pnl = round((actual_price - cost_price) * quantity - commission, 2)
         pnl_ratio = pnl / (cost_price * quantity) if cost_price > 0 else 0
         
         et_tz = pytz.timezone('America/New_York')

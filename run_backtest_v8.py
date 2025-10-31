@@ -164,6 +164,12 @@ class BacktestRunnerV8:
             # 解析expiry日期
             expiry_date = datetime.strptime(expiry_str, '%Y-%m-%d').date()
             
+            # 解析earnings: 距离earnings日期的天数（整数）
+            try:
+                earnings = int(row.get('earnings', '')) if row.get('earnings') else None
+            except (ValueError, TypeError):
+                earnings = None
+            
             # 创建SignalEvent (加入strike, expiry, spot, stock_price)
             signal_event = SignalEvent(
                 event_id=f"{ticker}_{signal_time_et.strftime('%Y%m%d%H%M%S')}",
@@ -176,7 +182,9 @@ class BacktestRunnerV8:
                 strike=strike,
                 expiry=expiry_date,
                 spot=spot,  # option price from signal
-                stock_price=stock_price  # stock price from CSV (for OTM calculation)
+                stock_price=stock_price,  # stock price from CSV (for OTM calculation)
+                iv_pct=float(row.get('iv_pct', '0').rstrip('%')) if row.get('iv_pct') else None,  # IV percentage from CSV
+                earnings=earnings # 添加earnings字段
             )
             
             return {

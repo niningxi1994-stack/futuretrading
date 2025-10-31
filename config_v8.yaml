@@ -32,8 +32,6 @@ strategy:
       # - ['09:30:00', '10:00:00']  # 只做早盘第一小时
       # - ['14:00:00', '16:00:00']  # 只做尾盘
     
-    # 距离收盘缓冲时间（分钟） - 15:54之后的信号不交易
-    market_close_buffer: 1
     
     # DTE过滤（天数）
     dte_min: 0          # 最小DTE，过滤<8天(0-7天)的短期期权
@@ -46,11 +44,27 @@ strategy:
     # Premium过滤（美元）
     premium_max: 50000000  # 最大Premium，过滤>2M的超大流动性期权（6笔，胜率33%）
     premium_min: 0        # 最小Premium（0表示不限制）
+    
+    # MACD过滤（技术指标，从Polygon API获取）
+    macd_enabled: false       # 是否启用MACD过滤
+    macd_threshold: 0        # MACD阈值，低于此值不交易（0表示看跌，过滤MACD<0的信号）
+    macd_short_window: 12    # MACD快线窗口
+    macd_long_window: 26     # MACD慢线窗口
+    macd_signal_window: 9    # MACD信号线窗口
+    macd_timespan: "day"     # 时间粒度（day/hour/minute）
+    
+    # Earnings过滤（距离earnings日期的天数）
+    earnings_enabled: false   # 是否启用Earnings过滤
+    earnings_max: 5          # 最大Earnings天数，超过此值不交易（>5天不交易）
+    
+    # 价格趋势过滤（比较-1天 vs -21天的收盘价）
+    price_trend_enabled: false      # 是否启用价格趋势过滤
+    price_trend_lookback: 21       # 向后看的天数（-21天）
   
   # ===== 仓位管理 =====
   position_compute:
     # V8固定仓位：每笔交易都是总资产的24%
-    fixed_position_ratio: 0.1
+    fixed_position_ratio: 0.05
     # 每日总仓位上限：99%（最多可以有4笔24%的仓位）
     max_daily_position: 0.99
   
