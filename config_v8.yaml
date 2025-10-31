@@ -70,7 +70,7 @@ strategy:
   
   # ===== 出场条件 =====
   stop_loss: 0.1      # 固定止损 -10%
-  take_profit: 0.20    # 止盈 +20%
+  take_profit: 0.4    # 止盈 +20%
   trailing_stop_loss: 0.3 # 追踪止损 -10%
   
   # expiry日期的出场时间（美东时间）
